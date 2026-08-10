@@ -40,6 +40,7 @@ jobs:
     if: vars.VERCEL_PRODUCTION_DEPLOYMENTS_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    environment: Production
     steps:
       - name: Require dashboard main
         env:

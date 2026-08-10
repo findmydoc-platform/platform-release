@@ -158,9 +158,12 @@ export async function applyPlatformRelease(
   })))
 
   const issues = new Map<string, PlatformReleasePlan['repositories']['website']['pullRequests'][number]['issues'][number]>()
+  const releaseRepositories = new Set(REPOSITORY_KEYS.map((key) => input.config.repositories[key].repository))
   for (const repository of Object.values(input.plan.repositories)) {
     for (const pullRequest of repository.pullRequests) {
-      for (const issue of pullRequest.issues) issues.set(`${issue.repository}#${issue.number}`, issue)
+      for (const issue of pullRequest.issues) {
+        if (releaseRepositories.has(issue.repository)) issues.set(`${issue.repository}#${issue.number}`, issue)
+      }
     }
   }
   const marker = `<!-- findmydoc-platform-release:${input.plan.version} -->`

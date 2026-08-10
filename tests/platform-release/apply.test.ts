@@ -82,6 +82,7 @@ Patients can read published reviews.
 `
 
 class ApplyGitHub implements PlatformReleaseGitHubClient {
+  comments: ReleaseIssue[] = []
   dispatches: string[] = []
   releases: string[] = []
   failureRepository?: string
@@ -106,7 +107,7 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
   async uploadReleaseManifest() {}
   async setReleaseAnnouncementState() {}
   async findIssueComment() { return false }
-  async addIssueComment(_input: { body: string; issue: ReleaseIssue }) {}
+  async addIssueComment(input: { body: string; issue: ReleaseIssue }) { this.comments.push(input.issue) }
   async compareCommits() { throw new Error('not used') }
   async getBranchSha() { throw new Error('not used') }
   async getLatestRelease() { throw new Error('not used') }
@@ -171,5 +172,36 @@ describe('platform release apply', () => {
       plan: untrustedPlan,
     }, github)).rejects.toThrow('does not match the trusted platform release configuration')
     expect(github.dispatches).toEqual([])
+  })
+
+  it('comments only issues in the two release repositories', async () => {
+    const github = new ApplyGitHub()
+    const frozenPlan = plan()
+    frozenPlan.repositories.website.pullRequests = [{
+      body: '',
+      issues: [
+        { number: 1, repository: 'findmydoc-platform/website', title: 'Website issue', url: 'https://github.com/findmydoc-platform/website/issues/1' },
+        { number: 2, repository: 'findmydoc-platform/management', title: 'Management issue', url: 'https://github.com/findmydoc-platform/management/issues/2' },
+      ],
+      number: 10,
+      repository: 'findmydoc-platform/website',
+      title: 'Feature',
+      url: 'https://github.com/findmydoc-platform/website/pull/10',
+      visuals: [],
+    }]
+    frozenPlan.digest = computePlanDigest(frozenPlan)
+
+    await applyPlatformRelease({
+      announce: false,
+      config,
+      confirmDigest: frozenPlan.digest,
+      confirmVersion: 'v0.46.0',
+      notes,
+      plan: frozenPlan,
+    }, github, { pollIntervalMs: 0, timeoutMs: 100 })
+
+    expect(github.comments.map((issue) => `${issue.repository}#${issue.number}`)).toEqual([
+      'findmydoc-platform/website#1',
+    ])
   })
 })
