@@ -34,6 +34,7 @@ describe('platform release workflows', () => {
     expect(workflow).toContain('persist-credentials: false')
     expect(workflow).toContain('git merge-base --is-ancestor "$TARGET_SHA" origin/main')
     expect(workflow).toContain('PLAN_DIGEST: ${{ inputs.plan_digest }}')
+    expect(workflow).toContain('test "$DEPLOY_REF" = "refs/heads/main"')
   })
 
   it('preserves the dashboard production validation depth', async () => {

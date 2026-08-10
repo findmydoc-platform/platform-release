@@ -45,6 +45,13 @@ jobs:
       name: Production
       url: ${{ steps.vercel-production.outputs.deploymentUrl }}
     steps:
+      - name: Require website main
+        env:
+          DEPLOY_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          test "$DEPLOY_REF" = "refs/heads/main"
+
       - name: Validate release inputs
         env:
           PLAN_DIGEST: ${{ inputs.plan_digest }}
