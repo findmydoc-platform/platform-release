@@ -9,7 +9,15 @@ const REQUIRED_HEADINGS = [
 export function validateReleaseNotes(notes: string): void {
   if (!notes.trim()) throw new Error('Approved release notes are empty.')
   for (const heading of REQUIRED_HEADINGS) {
-    if (!notes.includes(heading)) throw new Error(`Approved release notes must include "${heading}".`)
+    const headingIndex = notes.indexOf(heading)
+    if (headingIndex === -1) throw new Error(`Approved release notes must include "${heading}".`)
+    const bodyStart = headingIndex + heading.length
+    const nextHeading = notes.indexOf('\n## ', bodyStart)
+    const body = notes
+      .slice(bodyStart, nextHeading === -1 ? undefined : nextHeading)
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .trim()
+    if (!body) throw new Error(`Approved release notes must include reviewed content under "${heading}".`)
   }
 }
 

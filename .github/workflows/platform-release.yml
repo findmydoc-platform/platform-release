@@ -57,7 +57,7 @@ defaults:
 
 jobs:
   trusted-ref:
-    name: Require trusted Ops main
+    name: Require trusted automation main
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -81,7 +81,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - name: Verify trusted Ops checkout
+      - name: Verify trusted automation checkout
         env:
           TRUSTED_SHA: ${{ github.sha }}
         run: test "$(git rev-parse HEAD)" = "$TRUSTED_SHA"
@@ -160,7 +160,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - name: Verify trusted Ops checkout
+      - name: Verify trusted automation checkout
         env:
           TRUSTED_SHA: ${{ github.sha }}
         run: test "$(git rev-parse HEAD)" = "$TRUSTED_SHA"
