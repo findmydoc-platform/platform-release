@@ -40,11 +40,14 @@ jobs:
     if: vars.VERCEL_PRODUCTION_DEPLOYMENTS_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    env:
-      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
+      - name: Require dashboard main
+        env:
+          DEPLOY_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          test "$DEPLOY_REF" = "refs/heads/main"
+
       - name: Validate release inputs
         env:
           PLAN_DIGEST: ${{ inputs.plan_digest }}
@@ -98,12 +101,23 @@ jobs:
         run: pnpm build
 
       - name: Pull Vercel production settings
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: pnpm dlx "vercel@${VERCEL_CLI_VERSION}" pull --yes --environment=production --git-branch=main --token="$VERCEL_TOKEN"
 
       - name: Build Vercel production
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: pnpm dlx "vercel@${VERCEL_CLI_VERSION}" build --prod
 
       - name: Deploy Vercel production
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: pnpm dlx "vercel@${VERCEL_CLI_VERSION}" deploy --prebuilt --prod --yes --token="$VERCEL_TOKEN"
 
   deployment-disabled:

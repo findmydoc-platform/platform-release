@@ -93,6 +93,9 @@ jobs:
           app-id: ${{ secrets.PLATFORM_RELEASE_APP_ID }}
           private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}
           owner: findmydoc-platform
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
           repositories: |
             website
             clinic-dashboard
@@ -172,6 +175,10 @@ jobs:
           app-id: ${{ secrets.PLATFORM_RELEASE_APP_ID }}
           private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}
           owner: findmydoc-platform
+          permission-actions: write
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: read
           repositories: |
             website
             clinic-dashboard
