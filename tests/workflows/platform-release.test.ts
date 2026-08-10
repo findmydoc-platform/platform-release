@@ -13,6 +13,10 @@ describe('platform release workflows', () => {
     expect(workflow).toContain('--confirm-version "$CONFIRM_VERSION"')
     expect(workflow).toContain('--apply')
     expect(workflow).toContain('run-id: ${{ inputs.plan_run_id }}')
+    expect(workflow).toContain('args=(\n            plan')
+    expect(workflow).toContain('args=(\n            apply')
+    expect(workflow).not.toContain('platform-release plan\n')
+    expect(workflow).not.toContain('platform-release apply\n')
   })
 
   it('uses a short-lived app token for cross-repository operations', async () => {

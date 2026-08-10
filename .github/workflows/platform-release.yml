@@ -118,7 +118,7 @@ jobs:
         run: |
           set -euo pipefail
           args=(
-            platform-release plan
+            plan
             --output artifacts/platform-release/plan.json
             --notes-template artifacts/platform-release/release-notes.md
             --json
@@ -234,7 +234,7 @@ jobs:
         run: |
           set -euo pipefail
           args=(
-            platform-release apply
+            apply
             --plan artifacts/platform-release/plan.json
             --notes artifacts/platform-release/release-notes.md
             --confirm-digest "$CONFIRM_DIGEST"
