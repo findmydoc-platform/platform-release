@@ -185,18 +185,20 @@ jobs:
 
       - name: Verify plan artifact provenance
         env:
+          CURRENT_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
           PLAN_RUN_ID: ${{ inputs.plan_run_id }}
         run: |
           set -euo pipefail
-          IFS=$'\t' read -r source_event source_conclusion source_branch source_path <<< "$(
+          IFS=$'\t' read -r source_event source_conclusion source_branch source_path source_head_sha <<< "$(
             gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PLAN_RUN_ID}" \
-              --jq '[.event, .conclusion, .head_branch, .path] | @tsv'
+              --jq '[.event, .conclusion, .head_branch, .path, .head_sha] | @tsv'
           )"
           test "$source_event" = "workflow_dispatch"
           test "$source_conclusion" = "success"
           test "$source_branch" = "main"
           [[ "$source_path" == ".github/workflows/platform-release.yml"* ]]
+          test "$source_head_sha" = "$CURRENT_SHA"
 
       - name: Download frozen plan
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

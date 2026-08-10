@@ -20,6 +20,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate workflows
+        run: docker run --rm --volume "$GITHUB_WORKSPACE:/repo:ro" --workdir /repo rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+
       - name: Setup pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
