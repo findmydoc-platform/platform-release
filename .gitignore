@@ -1,0 +1,7 @@
+node_modules/
+dist/
+artifacts/
+.work/
+coverage/
+.DS_Store
+/design-qa.md

@@ -1,0 +1,113 @@
+name: Reusable Platform Release - Website
+
+on:
+  workflow_call:
+    inputs:
+      target_sha:
+        required: true
+        type: string
+      platform_version:
+        required: true
+        type: string
+      plan_digest:
+        required: true
+        type: string
+    secrets:
+      PAYLOAD_SECRET:
+        required: true
+      VERCEL_ORG_ID:
+        required: true
+      VERCEL_PROJECT_ID:
+        required: true
+      VERCEL_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_VERCEL_PROJECT_ID: prj_J8dOCr0Ft97TlCAUnbpdHG29Vtgx
+  NEXT_TELEMETRY_DISABLED: 1
+  NODE_VERSION: 24.14.0
+  PNPM_VERSION: 10.28.2
+  PRODUCTION_ALIAS_DOMAIN: findmydoc.eu
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    name: Deploy frozen website SHA
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: Production
+      url: ${{ steps.vercel-production.outputs.deploymentUrl }}
+    steps:
+      - name: Validate release inputs
+        env:
+          PLAN_DIGEST: ${{ inputs.plan_digest }}
+          PLATFORM_VERSION: ${{ inputs.platform_version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PLAN_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$PLATFORM_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.target_sha }}
+
+      - name: Verify frozen SHA belongs to main
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          cache: pnpm
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Pull Vercel production settings
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          bash ./.github/scripts/deploy/assert-vercel-project-binding.sh
+          pnpm dlx vercel@canary pull --yes --environment=production
+
+      - name: Deploy Vercel production
+        id: vercel-production
+        env:
+          PAYLOAD_SECRET: ${{ secrets.PAYLOAD_SECRET }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: bash ./.github/scripts/deploy/vercel-deploy.sh production
+
+      - name: Set production alias
+        env:
+          DEPLOYMENT_URL: ${{ steps.vercel-production.outputs.deploymentUrl }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          bash ./.github/scripts/deploy/assert-vercel-project-binding.sh
+          pnpm dlx vercel@canary alias set "$DEPLOYMENT_URL" "$PRODUCTION_ALIAS_DOMAIN"
+
+      - name: Generate deployment summary
+        if: always()
+        run: bash ./.github/scripts/deploy/write-production-summary.sh "${{ steps.vercel-production.outcome }}" "${{ steps.vercel-production.outputs.deploymentUrl }}"

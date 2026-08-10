@@ -1,0 +1,26 @@
+{
+  "name": "@findmydoc/platform-release",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fmd-platform-release": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "platform-release": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "commander": "^14.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.14"
+  },
+  "packageManager": "pnpm@10.13.1"
+}
