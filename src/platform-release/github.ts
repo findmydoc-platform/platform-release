@@ -15,10 +15,11 @@ import type {
 } from './types.js'
 
 type GitHubRelease = {
-  assets?: Array<{ name?: string }>
+  assets?: Array<{ id?: number; name?: string }>
   body?: string | null
   html_url?: string
   id?: number
+  published_at?: string | null
   prerelease?: boolean
   draft?: boolean
   tag_name?: string
@@ -199,14 +200,18 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   }
 
   async getPullRequests(repository: string, commits: ReleaseCommit[]): Promise<ReleasePullRequest[]> {
-    const numbers = new Set<number>()
+    const commitsByPullRequest = new Map<number, Set<string>>()
     for (const commit of commits) {
       const pulls = await api<Array<{ number: number }>>(`repos/${repository}/commits/${commit.sha}/pulls`)
-      for (const pull of pulls) numbers.add(pull.number)
+      for (const pull of pulls) {
+        const shas = commitsByPullRequest.get(pull.number) ?? new Set<string>()
+        shas.add(commit.sha)
+        commitsByPullRequest.set(pull.number, shas)
+      }
     }
 
     const pullRequests: ReleasePullRequest[] = []
-    for (const number of [...numbers].sort((left, right) => left - right)) {
+    for (const number of [...commitsByPullRequest.keys()].sort((left, right) => left - right)) {
       const pull = await api<{ body: string | null; html_url: string; merged_at: string | null; number: number; title: string }>(
         `repos/${repository}/pulls/${number}`,
       )
@@ -214,6 +219,7 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
       const body = pull.body ?? ''
       pullRequests.push({
         body: compactPullRequestBody(body),
+        commitShas: [...(commitsByPullRequest.get(number) ?? [])].sort(),
         issues: await closingIssues(repository, number),
         number: pull.number,
         repository,
@@ -271,10 +277,12 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
 
   async getRelease(repository: string, version: string): Promise<PlatformReleaseDetails | undefined> {
     const release = await optionalApi<GitHubRelease>(`repos/${repository}/releases/tags/${encodeURIComponent(version)}`)
-    if (!release?.html_url || !release.id) return undefined
+    if (!release?.html_url || !release.id || !release.published_at) return undefined
     return {
       announcementState: announcementState(release.body),
+      body: release.body ?? '',
       id: release.id,
+      publishedAt: release.published_at,
       sha: await resolveTagSha(repository, version),
       url: release.html_url,
     }
@@ -305,7 +313,7 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     repository: string
     targetSha: string
     version: string
-  }): Promise<{ id: number; url: string }> {
+  }): Promise<PlatformReleaseDetails> {
     const existingRef = await optionalApi<{ object: { sha: string; type: string } }>(
       `repos/${input.repository}/git/ref/tags/${encodeURIComponent(input.version)}`,
     )
@@ -327,13 +335,32 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
       },
       method: 'POST',
     })
-    if (!release.id || !release.html_url) throw new Error(`GitHub did not return the created release for ${input.repository}.`)
-    return { id: release.id, url: release.html_url }
+    if (!release.id || !release.html_url || !release.published_at) {
+      throw new Error(`GitHub did not return the created release for ${input.repository}.`)
+    }
+    return {
+      body: input.body,
+      id: release.id,
+      publishedAt: release.published_at,
+      sha: await resolveTagSha(input.repository, input.version),
+      url: release.html_url,
+    }
   }
 
-  async uploadReleaseManifest(input: { manifest: string; repository: string; version: string }): Promise<void> {
+  async ensureReleaseManifest(input: { manifest: string; repository: string; version: string }): Promise<void> {
     const release = await api<GitHubRelease>(`repos/${input.repository}/releases/tags/${encodeURIComponent(input.version)}`)
-    if (release.assets?.some((asset) => asset.name === 'platform-release.json')) return
+    const asset = release.assets?.find((candidate) => candidate.name === 'platform-release.json')
+    if (asset) {
+      if (!asset.id) throw new Error(`${input.repository} platform-release.json has no asset ID.`)
+      const existing = await runGh([
+        'api',
+        '--header',
+        'Accept: application/octet-stream',
+        `repos/${input.repository}/releases/assets/${asset.id}`,
+      ])
+      assertMatchingReleaseManifest(existing, input.manifest, input.repository, input.version)
+      return
+    }
     const directory = await mkdtemp(join(tmpdir(), 'fmd-platform-release-'))
     const path = join(directory, 'platform-release.json')
     try {
@@ -356,5 +383,16 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
       body: { body: input.body },
       method: 'POST',
     })
+  }
+}
+
+export function assertMatchingReleaseManifest(
+  existing: string,
+  expected: string,
+  repository: string,
+  version: string,
+): void {
+  if (existing !== expected) {
+    throw new Error(`${repository} already has a different platform-release.json for ${version}.`)
   }
 }

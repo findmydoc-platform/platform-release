@@ -4,12 +4,17 @@ export type PlatformReleaseRepositoryConfig = {
   branch: string
   cutoverSha?: string
   deploymentWorkflow: string
+  displayName: string
   productionUrl: string
   repository: string
   surface: string
 }
 
 export type PlatformReleaseConfig = {
+  founderOps: {
+    baseUrl: string
+    ingestPath: string
+  }
   platformBaselineVersion: string
   repositories: Record<PlatformRepositoryKey, PlatformReleaseRepositoryConfig>
   schemaVersion: 1
@@ -45,6 +50,7 @@ export type ReleaseVisual = {
 
 export type ReleasePullRequest = {
   body: string
+  commitShas: string[]
   issues: ReleaseIssue[]
   number: number
   repository: string
@@ -80,7 +86,7 @@ export type PlatformReleasePlan = {
   highestBump: ReleaseBump
   manualVersion: boolean
   repositories: Record<PlatformRepositoryKey, PlatformReleaseRepositoryPlan>
-  schemaVersion: 1
+  schemaVersion: 2
   version: string
   visualCandidates: ReleaseVisual[]
 }
@@ -97,9 +103,74 @@ export type ReleaseAnnouncementState = 'pending' | 'sent'
 
 export type PlatformReleaseDetails = {
   announcementState?: ReleaseAnnouncementState
+  body: string
   id: number
+  publishedAt: string
   sha: string
   url: string
+}
+
+export type ReleaseContentSection = 'dashboard' | 'platform' | 'public'
+export type ReleaseContentKind = 'feature' | 'fix' | 'maintenance'
+
+export type ReleaseContentPullRequestReference = {
+  number: number
+  repository: string
+}
+
+export type ReleaseContentChange = {
+  id: string
+  kind: ReleaseContentKind
+  pullRequests: ReleaseContentPullRequestReference[]
+  section: ReleaseContentSection
+  summary: string
+  title: string
+  visualUrls: string[]
+}
+
+export type PlatformReleaseContent = {
+  changes: ReleaseContentChange[]
+  highlights: string[]
+  schemaVersion: 1
+  summary: string
+}
+
+export type PlatformReleaseManifestComponent = {
+  commits: ReleaseCommit[]
+  deploymentRun: string
+  displayName: string
+  key: PlatformRepositoryKey
+  productionUrl: string
+  pullRequests: Array<Omit<ReleasePullRequest, 'body' | 'visuals'>>
+  release: string
+  repository: string
+  targetSha: string
+}
+
+export type PlatformReleaseManifestV2 = {
+  changes: ReleaseContentChange[]
+  components: PlatformReleaseManifestComponent[]
+  contentDigest: string
+  highlights: string[]
+  manifestDigest: string
+  planDigest: string
+  publishedAt: string
+  schemaVersion: 2
+  summary: string
+  version: string
+  visuals: ReleaseVisual[]
+}
+
+export type FounderOpsIngestResult = {
+  replayed: boolean
+  url: string
+}
+
+export type FounderOpsReleaseClient = {
+  ingestManifest(input: {
+    manifest: string
+    manifestDigest: string
+  }): Promise<FounderOpsIngestResult>
 }
 
 export type PlatformReleaseGitHubClient = {
@@ -110,7 +181,7 @@ export type PlatformReleaseGitHubClient = {
     repository: string
     targetSha: string
     version: string
-  }): Promise<{ id: number; url: string }>
+  }): Promise<PlatformReleaseDetails>
   dispatchWorkflow(input: {
     branch: string
     inputs: Record<string, string>
@@ -134,7 +205,7 @@ export type PlatformReleaseGitHubClient = {
     state: ReleaseAnnouncementState
     version: string
   }): Promise<void>
-  uploadReleaseManifest(input: {
+  ensureReleaseManifest(input: {
     manifest: string
     repository: string
     version: string
@@ -143,7 +214,10 @@ export type PlatformReleaseGitHubClient = {
 
 export type PlatformReleaseApplyResult = {
   announcement: 'already_sent' | 'sent' | 'skipped'
+  contentDigest: string
   digest: string
+  founderOps: FounderOpsIngestResult
+  manifestDigest: string
   releases: Record<PlatformRepositoryKey, { url: string }>
   status: 'published'
   version: string

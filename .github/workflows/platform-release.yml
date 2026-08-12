@@ -29,8 +29,12 @@ on:
         description: Exact frozen plan digest required for apply mode
         required: false
         type: string
-      release_notes:
-        description: Approved Markdown notes required for apply mode
+      release_content:
+        description: Approved release-content.json required for apply mode
+        required: false
+        type: string
+      confirm_content_digest:
+        description: Exact structured content digest required for apply mode
         required: false
         type: string
       announce:
@@ -120,7 +124,7 @@ jobs:
           args=(
             plan
             --output artifacts/platform-release/plan.json
-            --notes-template artifacts/platform-release/release-notes.md
+            --content-template artifacts/platform-release/release-content.template.json
             --json
           )
           if [[ -n "$MANUAL_VERSION" ]]; then
@@ -148,15 +152,17 @@ jobs:
       - name: Validate apply inputs
         env:
           CONFIRM_DIGEST: ${{ inputs.confirm_digest }}
+          CONFIRM_CONTENT_DIGEST: ${{ inputs.confirm_content_digest }}
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
           PLAN_RUN_ID: ${{ inputs.plan_run_id }}
-          RELEASE_NOTES: ${{ inputs.release_notes }}
+          RELEASE_CONTENT: ${{ inputs.release_content }}
         run: |
           set -euo pipefail
           [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$CONFIRM_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$CONFIRM_CONTENT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CONFIRM_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          test -n "$RELEASE_NOTES"
+          test -n "$RELEASE_CONTENT"
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -208,10 +214,10 @@ jobs:
           path: artifacts/platform-release
           run-id: ${{ inputs.plan_run_id }}
 
-      - name: Write approved notes
+      - name: Write approved release content
         env:
-          RELEASE_NOTES: ${{ inputs.release_notes }}
-        run: node --input-type=module -e "import { writeFileSync } from 'node:fs'; writeFileSync('artifacts/platform-release/release-notes.md', process.env.RELEASE_NOTES + '\n')"
+          RELEASE_CONTENT: ${{ inputs.release_content }}
+        run: node --input-type=module -e "import { writeFileSync } from 'node:fs'; writeFileSync('artifacts/platform-release/release-content.json', process.env.RELEASE_CONTENT + '\n')"
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
@@ -227,7 +233,9 @@ jobs:
       - name: Apply platform release
         env:
           CONFIRM_DIGEST: ${{ inputs.confirm_digest }}
+          CONFIRM_CONTENT_DIGEST: ${{ inputs.confirm_content_digest }}
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
+          FOUNDEROPS_PLATFORM_RELEASE_TOKEN: ${{ secrets.FOUNDEROPS_PLATFORM_RELEASE_TOKEN }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
           SEND_ANNOUNCEMENT: ${{ inputs.announce }}
@@ -236,8 +244,10 @@ jobs:
           args=(
             apply
             --plan artifacts/platform-release/plan.json
-            --notes artifacts/platform-release/release-notes.md
+            --content artifacts/platform-release/release-content.json
+            --manifest-output artifacts/platform-release/platform-release.json
             --confirm-digest "$CONFIRM_DIGEST"
+            --confirm-content-digest "$CONFIRM_CONTENT_DIGEST"
             --confirm-version "$CONFIRM_VERSION"
             --apply
             --json
@@ -246,3 +256,12 @@ jobs:
             args+=(--announce)
           fi
           pnpm platform-release "${args[@]}"
+
+      - name: Upload canonical release manifest for resume
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: platform-release-manifest
+          path: artifacts/platform-release/platform-release.json
+          if-no-files-found: ignore
+          retention-days: 30

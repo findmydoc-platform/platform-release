@@ -1,7 +1,6 @@
-import { readFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
 import { announcePlatformReleaseOnce } from './announce.js'
-import { approvedReleaseVisuals, renderRepositoryReleaseNotes, validateReleaseNotes } from './notes.js'
+import { computeReleaseContentDigest, renderRepositoryReleaseNotes, validateReleaseContent } from './content.js'
+import { createPlatformReleaseManifest, serializePlatformReleaseManifest } from './manifest.js'
 import {
   platformDeploymentWorkflowTitle,
   validatePlanAgainstConfig,
@@ -10,6 +9,8 @@ import {
 import type {
   PlatformReleaseApplyResult,
   PlatformReleaseConfig,
+  PlatformReleaseContent,
+  FounderOpsReleaseClient,
   PlatformReleaseGitHubClient,
   PlatformReleasePlan,
   PlatformRepositoryKey,
@@ -17,6 +18,7 @@ import type {
 } from './types.js'
 
 const REPOSITORY_KEYS: PlatformRepositoryKey[] = ['dashboard', 'website']
+const ANNOUNCEMENT_MARKER = /\n*<!--\s*findmydoc-platform-announcement:(?:pending|sent)\s*-->\s*$/
 
 const delay = (milliseconds: number) => new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds))
 
@@ -87,24 +89,30 @@ export async function applyPlatformRelease(
   input: {
     announce: boolean
     config: PlatformReleaseConfig
+    confirmContentDigest: string
     confirmDigest: string
     confirmVersion: string
-    notes: string
+    content: PlatformReleaseContent
+    onManifest?: (manifest: string) => Promise<void>
     plan: PlatformReleasePlan
     webhook?: string
   },
   github: PlatformReleaseGitHubClient,
+  founderOps: FounderOpsReleaseClient,
   options: { pollIntervalMs?: number; timeoutMs?: number } = {},
 ): Promise<PlatformReleaseApplyResult> {
   validatePlatformReleasePlan(input.plan)
   validatePlanAgainstConfig(input.plan, input.config)
-  validateReleaseNotes(input.notes)
-  const approvedVisuals = approvedReleaseVisuals(input.plan, input.notes)
+  const content = validateReleaseContent(input.plan, input.content)
+  const contentDigest = computeReleaseContentDigest(content)
   if (input.confirmDigest !== input.plan.digest) {
     throw new Error(`Digest confirmation must exactly match ${input.plan.digest}.`)
   }
   if (input.confirmVersion !== input.plan.version) {
     throw new Error(`Confirmation must exactly match ${input.plan.version}.`)
+  }
+  if (input.confirmContentDigest !== contentDigest) {
+    throw new Error(`Content digest confirmation must exactly match ${contentDigest}.`)
   }
   if (input.announce && !input.webhook) throw new Error('GOOGLE_CHAT_WEBHOOK_URL is required with --announce.')
 
@@ -123,39 +131,47 @@ export async function applyPlatformRelease(
     [key, await ensureDeployment(input.plan, key, github, workflowOptions)] as const))
   const workflows = Object.fromEntries(workflowEntries) as PlatformReleaseApplyResult['workflows']
 
-  const releaseEntries: Array<readonly [PlatformRepositoryKey, { url: string }]> = []
+  const releaseEntries: Array<readonly [PlatformRepositoryKey, Awaited<ReturnType<PlatformReleaseGitHubClient['createRelease']>>]> = []
   for (const key of REPOSITORY_KEYS) {
     const repository = input.plan.repositories[key]
+    const expectedBody = renderRepositoryReleaseNotes(input.plan, content, key)
     const existing = await github.getRelease(repository.repository, input.plan.version)
     if (existing && existing.sha !== repository.targetSha) {
       throw new Error(`${repository.repository} ${input.plan.version} points to ${existing.sha}, not ${repository.targetSha}.`)
     }
+    if (existing && existing.body.replace(ANNOUNCEMENT_MARKER, '').trim() !== expectedBody.trim()) {
+      throw new Error(`${repository.repository} ${input.plan.version} release notes do not match the approved content.`)
+    }
     const release = existing ?? await github.createRelease({
-      body: renderRepositoryReleaseNotes(input.plan, input.notes, key),
+      body: expectedBody,
       repository: repository.repository,
       targetSha: repository.targetSha,
       version: input.plan.version,
     })
-    releaseEntries.push([key, { url: release.url }])
+    releaseEntries.push([key, release])
   }
-  const releases = Object.fromEntries(releaseEntries) as PlatformReleaseApplyResult['releases']
+  const releaseDetails = Object.fromEntries(releaseEntries) as Record<PlatformRepositoryKey, Awaited<ReturnType<PlatformReleaseGitHubClient['createRelease']>>>
+  const releases = Object.fromEntries(REPOSITORY_KEYS.map((key) => [key, { url: releaseDetails[key].url }])) as PlatformReleaseApplyResult['releases']
 
-  const manifest = `${JSON.stringify({
-    digest: input.plan.digest,
-    repositories: Object.fromEntries(REPOSITORY_KEYS.map((key) => [key, {
-      deploymentRun: workflows[key].url,
-      release: releases[key].url,
-      repository: input.plan.repositories[key].repository,
-      targetSha: input.plan.repositories[key].targetSha,
-    }])),
-    schemaVersion: 1,
-    version: input.plan.version,
-  }, null, 2)}\n`
-  await Promise.all(REPOSITORY_KEYS.map((key) => github.uploadReleaseManifest({
-    manifest,
+  const manifest = createPlatformReleaseManifest({
+    config: input.config,
+    content,
+    contentDigest,
+    plan: input.plan,
+    releases: releaseDetails,
+    workflows,
+  })
+  const serializedManifest = serializePlatformReleaseManifest(manifest)
+  await input.onManifest?.(serializedManifest)
+  await Promise.all(REPOSITORY_KEYS.map((key) => github.ensureReleaseManifest({
+    manifest: serializedManifest,
     repository: input.plan.repositories[key].repository,
     version: input.plan.version,
   })))
+  const founderOpsResult = await founderOps.ingestManifest({
+    manifest: serializedManifest,
+    manifestDigest: manifest.manifestDigest,
+  })
 
   const issues = new Map<string, PlatformReleasePlan['repositories']['website']['pullRequests'][number]['issues'][number]>()
   const releaseRepositories = new Set(REPOSITORY_KEYS.map((key) => input.config.repositories[key].repository))
@@ -184,24 +200,21 @@ export async function applyPlatformRelease(
   let announcement: PlatformReleaseApplyResult['announcement'] = 'skipped'
   if (input.announce) {
     announcement = await announcePlatformReleaseOnce({
-      notes: input.notes,
-      plan: input.plan,
-      releaseUrls: { dashboard: releases.dashboard.url, website: releases.website.url },
-      visuals: approvedVisuals,
+      founderOpsUrl: founderOpsResult.url,
+      manifest,
       webhook: input.webhook ?? '',
     }, github)
   }
 
   return {
     announcement,
+    contentDigest,
     digest: input.plan.digest,
+    founderOps: founderOpsResult,
+    manifestDigest: manifest.manifestDigest,
     releases,
     status: 'published',
     version: input.plan.version,
     workflows,
   }
-}
-
-export async function readApprovedReleaseNotes(path: string): Promise<string> {
-  return readFile(resolve(path), 'utf8')
 }

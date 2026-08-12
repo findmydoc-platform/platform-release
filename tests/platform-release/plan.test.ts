@@ -8,12 +8,14 @@ import type {
 } from '../../src/platform-release/types.js'
 
 const config: PlatformReleaseConfig = {
+  founderOps: { baseUrl: 'https://founder-ops.findmydoc.eu', ingestPath: '/api/team/platform-releases/v1/releases' },
   platformBaselineVersion: 'v0.45.0',
   repositories: {
     dashboard: {
       branch: 'main',
       cutoverSha: 'dashboard-base',
       deploymentWorkflow: 'platform-release-deploy.yml',
+      displayName: 'Clinic Dashboard',
       productionUrl: 'https://clinics.findmydoc.eu',
       repository: 'findmydoc-platform/clinic-dashboard',
       surface: 'Dashboard for clinics',
@@ -21,6 +23,7 @@ const config: PlatformReleaseConfig = {
     website: {
       branch: 'main',
       deploymentWorkflow: 'platform-release-deploy.yml',
+      displayName: 'Website',
       productionUrl: 'https://findmydoc.eu',
       repository: 'findmydoc-platform/website',
       surface: 'Public platform',
@@ -58,7 +61,7 @@ class PlanningGitHub implements PlatformReleaseGitHubClient {
   async findIssueComment() { return false }
   async findWorkflowRun() { return undefined }
   async getRelease() { return undefined }
-  async uploadReleaseManifest() { throw new Error('not used') }
+  async ensureReleaseManifest() { throw new Error('not used') }
 }
 
 describe('platform release planning', () => {
