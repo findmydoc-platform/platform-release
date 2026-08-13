@@ -38,8 +38,11 @@ class GhError extends Error {
   }
 }
 
-function childEnvironment(): NodeJS.ProcessEnv {
+export function githubChildEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const allowlist = [
+    'APPDATA',
+    'COMSPEC',
+    'GH_CONFIG_DIR',
     'GH_ENTERPRISE_TOKEN',
     'GH_HOST',
     'GH_TOKEN',
@@ -47,16 +50,22 @@ function childEnvironment(): NodeJS.ProcessEnv {
     'HOME',
     'LANG',
     'LC_ALL',
+    'LOCALAPPDATA',
     'PATH',
+    'PATHEXT',
+    'SystemRoot',
+    'TEMP',
+    'TMP',
+    'USERPROFILE',
     'XDG_CONFIG_HOME',
   ] as const
-  return Object.fromEntries(allowlist.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]]))
+  return Object.fromEntries(allowlist.flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]]]))
 }
 
 async function runGh(args: string[], input?: string): Promise<string> {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn('gh', args, {
-      env: childEnvironment(),
+      env: githubChildEnvironment(),
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     let stdout = ''
