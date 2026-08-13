@@ -380,19 +380,6 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     }
   }
 
-  async findIssueComment(input: { issue: ReleaseIssue; marker: string }): Promise<boolean> {
-    const comments = await api<Array<{ body?: string }>>(
-      `repos/${input.issue.repository}/issues/${input.issue.number}/comments?per_page=100`,
-    )
-    return comments.some((comment) => comment.body?.includes(input.marker))
-  }
-
-  async addIssueComment(input: { body: string; issue: ReleaseIssue }): Promise<void> {
-    await api(`repos/${input.issue.repository}/issues/${input.issue.number}/comments`, {
-      body: { body: input.body },
-      method: 'POST',
-    })
-  }
 }
 
 export function assertMatchingReleaseManifest(

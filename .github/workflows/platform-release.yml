@@ -183,7 +183,6 @@ jobs:
           owner: findmydoc-platform
           permission-actions: write
           permission-contents: write
-          permission-issues: write
           permission-pull-requests: read
           repositories: |
             website

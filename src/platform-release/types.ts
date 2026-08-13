@@ -174,7 +174,6 @@ export type FounderOpsReleaseClient = {
 }
 
 export type PlatformReleaseGitHubClient = {
-  addIssueComment(input: { body: string; issue: ReleaseIssue }): Promise<void>
   compareCommits(repository: string, base: string, head: string): Promise<ReleaseCommit[]>
   createRelease(input: {
     body: string
@@ -188,7 +187,6 @@ export type PlatformReleaseGitHubClient = {
     repository: string
     workflow: string
   }): Promise<void>
-  findIssueComment(input: { issue: ReleaseIssue; marker: string }): Promise<boolean>
   findWorkflowRun(input: {
     branch: string
     repository: string

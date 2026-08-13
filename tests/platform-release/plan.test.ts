@@ -4,7 +4,6 @@ import type {
   PlatformReleaseConfig,
   PlatformReleaseGitHubClient,
   ReleaseCommit,
-  ReleaseIssue,
 } from '../../src/platform-release/types.js'
 
 const config: PlatformReleaseConfig = {
@@ -55,10 +54,8 @@ class PlanningGitHub implements PlatformReleaseGitHubClient {
       : [commit('dashboard-commit', 'fix(reviews): correct moderation state')]
   }
   async getPullRequests() { return [] }
-  async addIssueComment(_input: { body: string; issue: ReleaseIssue }) {}
   async createRelease() { throw new Error('not used') }
   async dispatchWorkflow() { throw new Error('not used') }
-  async findIssueComment() { return false }
   async findWorkflowRun() { return undefined }
   async getRelease() { return undefined }
   async ensureReleaseManifest() { throw new Error('not used') }

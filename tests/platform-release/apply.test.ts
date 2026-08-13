@@ -71,7 +71,6 @@ function content(): PlatformReleaseContent {
 }
 
 class ApplyGitHub implements PlatformReleaseGitHubClient {
-  comments: ReleaseIssue[] = []
   dispatches: string[] = []
   events: string[] = []
   manifests: string[] = []
@@ -104,8 +103,6 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
     this.manifests.push(input.manifest)
   }
   async setReleaseAnnouncementState() {}
-  async findIssueComment() { return false }
-  async addIssueComment(input: { body: string; issue: ReleaseIssue }) { this.events.push('comment'); this.comments.push(input.issue) }
   async compareCommits() { throw new Error('not used') }
   async getBranchSha() { throw new Error('not used') }
   async getLatestRelease() { throw new Error('not used') }
@@ -164,19 +161,6 @@ describe('platform release apply', () => {
     await expect(applyPlatformRelease(applyInput(untrustedPlan), github, new FounderOps(github.events)))
       .rejects.toThrow('does not match the trusted platform release configuration')
     expect(github.dispatches).toEqual([])
-  })
-
-  it('stops issue comments when FounderOps ingestion fails', async () => {
-    const github = new ApplyGitHub()
-    const frozenPlan = plan()
-    frozenPlan.repositories.website.pullRequests[0]!.issues = [
-      { number: 1, repository: 'findmydoc-platform/website', title: 'Website issue', url: 'https://github.com/findmydoc-platform/website/issues/1' },
-    ]
-    frozenPlan.digest = computePlanDigest(frozenPlan)
-    await expect(applyPlatformRelease(applyInput(frozenPlan), github, new FounderOps(github.events, true), { pollIntervalMs: 0, timeoutMs: 100 }))
-      .rejects.toThrow('FounderOps failed')
-    expect(github.comments).toEqual([])
-    expect(github.releases).toHaveLength(2)
   })
 
   it('resumes after the first GitHub release without recreating it', async () => {
