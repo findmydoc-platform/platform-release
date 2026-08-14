@@ -1,11 +1,20 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { announcePlatformReleaseOnce } from './platform-release/announce.js'
-import { applyPlatformRelease, readApprovedReleaseNotes } from './platform-release/apply.js'
+import { applyPlatformRelease } from './platform-release/apply.js'
+import {
+  computeReleaseContentDigest,
+  readReleaseContent,
+  releaseContentTemplate,
+  renderReleaseContentPreview,
+} from './platform-release/content.js'
 import { DEFAULT_PLATFORM_RELEASE_CONFIG_PATH, loadPlatformReleaseConfig } from './platform-release/config.js'
+import { HttpFounderOpsReleaseClient } from './platform-release/founder-ops.js'
 import { GhPlatformReleaseClient } from './platform-release/github.js'
-import { approvedReleaseVisuals, releaseNotesTemplate } from './platform-release/notes.js'
+import { readPlatformReleaseManifest, validateManifestAgainstConfig } from './platform-release/manifest.js'
 import {
   createPlatformReleasePlan,
   readPlatformReleasePlan,
@@ -14,40 +23,22 @@ import {
 import { getPlatformReleaseStatus } from './platform-release/status.js'
 import type { PlatformReleaseGitHubClient } from './platform-release/types.js'
 
-type PlanOptions = {
-  configPath: string
-  json?: boolean
-  notesTemplate?: string
-  output?: string
-  version?: string
-}
-
+type PlanOptions = { configPath: string; contentTemplate?: string; json?: boolean; output?: string; version?: string }
+type ContentOptions = { content: string; json?: boolean; plan: string }
 type ApplyOptions = {
   announce?: boolean
   apply: boolean
   configPath: string
+  confirmContentDigest: string
   confirmDigest: string
   confirmVersion: string
+  content: string
   json?: boolean
-  notes: string
+  manifestOutput: string
   plan: string
 }
-
-type StatusOptions = {
-  json?: boolean
-  plan: string
-}
-
-type AnnounceOptions = {
-  confirmDigest: string
-  confirmVersion: string
-  force?: boolean
-  json?: boolean
-  notes: string
-  plan: string
-  send: boolean
-}
-
+type StatusOptions = { json?: boolean; plan: string }
+type AnnounceOptions = { configPath: string; confirmManifestDigest: string; force?: boolean; json?: boolean; manifest: string; send: boolean }
 type CliRuntime = {
   createGitHubClient: () => PlatformReleaseGitHubClient
   writeStderr: (value: string) => void
@@ -77,10 +68,18 @@ function isCommanderError(error: unknown): error is Error & { code: string; exit
   return typeof candidate.code === 'string' && typeof candidate.exitCode === 'number'
 }
 
+function founderOpsClient(config: Awaited<ReturnType<typeof loadPlatformReleaseConfig>>): HttpFounderOpsReleaseClient {
+  return new HttpFounderOpsReleaseClient(
+    config.founderOps.baseUrl,
+    config.founderOps.ingestPath,
+    process.env.FOUNDEROPS_PLATFORM_RELEASE_TOKEN ?? '',
+  )
+}
+
 export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Command {
   const runtime = { ...defaultRuntime, ...runtimeOverrides }
   const program = new Command()
-  program.name('fmd-platform-release').description('Publish one findmydoc version across both applications').version('0.1.0')
+  program.name('fmd-platform-release').description('Publish one findmydoc version across both applications').version('0.2.0')
   program.configureOutput({
     outputError: (value, write) => write(value),
     writeErr: runtime.writeStderr,
@@ -94,22 +93,17 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
     .option('--config-path <path>', 'platform release configuration path', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
     .option('--version <version>', 'explicit platform version for a manually decided release')
     .option('--output <path>', 'write the immutable JSON plan to this path')
-    .option('--notes-template <path>', 'write a release-notes drafting template')
+    .option('--content-template <path>', 'write a structured release-content drafting template')
     .option('--json', 'emit JSON output')
     .action(async (options: PlanOptions) => {
       try {
         const config = await loadPlatformReleaseConfig(options.configPath)
-        const plan = await createPlatformReleasePlan(
-          { config, manualVersion: options.version },
-          runtime.createGitHubClient(),
-        )
+        const plan = await createPlatformReleasePlan({ config, manualVersion: options.version }, runtime.createGitHubClient())
         if (options.output) await writePlatformReleasePlan(options.output, plan)
-        if (options.notesTemplate) {
-          const { mkdir, writeFile } = await import('node:fs/promises')
-          const { dirname, resolve } = await import('node:path')
-          const notesPath = resolve(options.notesTemplate)
-          await mkdir(dirname(notesPath), { recursive: true })
-          await writeFile(notesPath, releaseNotesTemplate(plan), 'utf8')
+        if (options.contentTemplate) {
+          const contentPath = resolve(options.contentTemplate)
+          await mkdir(dirname(contentPath), { recursive: true })
+          await writeFile(contentPath, `${JSON.stringify(releaseContentTemplate(plan), null, 2)}\n`, 'utf8')
         }
         if (options.json) writeJson(plan, runtime.writeStdout)
         else runtime.writeStdout([
@@ -125,33 +119,65 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
     })
 
   program
+    .command('content')
+    .description('Validate structured release content and render its German reading view')
+    .requiredOption('--plan <path>', 'immutable JSON plan')
+    .requiredOption('--content <path>', 'approved structured release content JSON')
+    .option('--json', 'emit JSON output')
+    .action(async (options: ContentOptions) => {
+      try {
+        const plan = await readPlatformReleasePlan(options.plan)
+        const content = await readReleaseContent(options.content, plan)
+        const result = {
+          content,
+          contentDigest: computeReleaseContentDigest(content),
+          planDigest: plan.digest,
+          preview: renderReleaseContentPreview(content),
+          version: plan.version,
+        }
+        if (options.json) writeJson(result, runtime.writeStdout)
+        else runtime.writeStdout(`${result.preview}\n\nVersion: ${result.version}\nPlan digest: ${result.planDigest}\nContent digest: ${result.contentDigest}\n`)
+      } catch (error) {
+        writeError(error, options.json, runtime)
+      }
+    })
+
+  program
     .command('apply')
-    .description('Deploy both frozen SHAs and publish both GitHub releases')
+    .description('Deploy both frozen SHAs and publish the joint platform release')
     .requiredOption('--plan <path>', 'immutable JSON plan created by plan')
-    .requiredOption('--notes <path>', 'approved release notes Markdown')
+    .requiredOption('--content <path>', 'approved structured release content JSON')
     .requiredOption('--confirm-digest <digest>', 'must exactly match the frozen plan digest')
+    .requiredOption('--confirm-content-digest <digest>', 'must exactly match the approved content digest')
     .requiredOption('--confirm-version <version>', 'must exactly match the planned version')
     .requiredOption('--apply', 'perform deployments and publication')
+    .option('--manifest-output <path>', 'write the canonical manifest for resume', 'artifacts/platform-release/platform-release.json')
     .option('--config-path <path>', 'trusted platform release configuration path', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
-    .option('--announce', 'send the joint Google Chat announcement after publication')
+    .option('--announce', 'send the compact Google Chat announcement after FounderOps ingestion')
     .option('--json', 'emit JSON output')
     .action(async (options: ApplyOptions) => {
       try {
         if (!options.apply) throw new Error('--apply is required for platform release publication.')
-        const [config, plan, notes] = await Promise.all([
+        const [config, plan] = await Promise.all([
           loadPlatformReleaseConfig(options.configPath),
           readPlatformReleasePlan(options.plan),
-          readApprovedReleaseNotes(options.notes),
         ])
+        const content = await readReleaseContent(options.content, plan)
         const result = await applyPlatformRelease({
           announce: options.announce === true,
           config,
+          confirmContentDigest: options.confirmContentDigest,
           confirmDigest: options.confirmDigest,
           confirmVersion: options.confirmVersion,
-          notes,
+          content,
+          onManifest: async (manifest) => {
+            const manifestPath = resolve(options.manifestOutput)
+            await mkdir(dirname(manifestPath), { recursive: true })
+            await writeFile(manifestPath, manifest, 'utf8')
+          },
           plan,
           webhook: process.env.GOOGLE_CHAT_WEBHOOK_URL,
-        }, runtime.createGitHubClient())
+        }, runtime.createGitHubClient(), founderOpsClient(config))
         if (options.json) writeJson(result, runtime.writeStdout)
         else runtime.writeStdout(`Published findmydoc ${result.version}.\n`)
       } catch (error) {
@@ -166,11 +192,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
     .option('--json', 'emit JSON output')
     .action(async (options: StatusOptions) => {
       try {
-        const result = await getPlatformReleaseStatus(
-          await readPlatformReleasePlan(options.plan),
-          runtime.createGitHubClient(),
-        )
-        writeJson(result, runtime.writeStdout)
+        writeJson(await getPlatformReleaseStatus(await readPlatformReleasePlan(options.plan), runtime.createGitHubClient()), runtime.writeStdout)
       } catch (error) {
         writeError(error, options.json, runtime)
       }
@@ -178,40 +200,43 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
 
   program
     .command('announce')
-    .description('Send the joint announcement for already published application releases')
-    .requiredOption('--plan <path>', 'immutable JSON plan')
-    .requiredOption('--notes <path>', 'approved release notes Markdown')
-    .requiredOption('--confirm-digest <digest>', 'must exactly match the frozen plan digest')
-    .requiredOption('--confirm-version <version>', 'must exactly match the planned version')
+    .description('Ingest an existing manifest idempotently, then send its compact Google Chat announcement')
+    .requiredOption('--manifest <path>', 'canonical platform-release.json manifest')
+    .requiredOption('--confirm-manifest-digest <digest>', 'must exactly match the manifest digest')
     .requiredOption('--send', 'send the announcement')
+    .option('--config-path <path>', 'trusted platform release configuration path', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
     .option('--force', 'continue an ambiguous pending announcement after checking Google Chat')
     .option('--json', 'emit JSON output')
     .action(async (options: AnnounceOptions) => {
       try {
-        const [plan, notes] = await Promise.all([
-          readPlatformReleasePlan(options.plan),
-          readApprovedReleaseNotes(options.notes),
-        ])
-        if (options.confirmDigest !== plan.digest) throw new Error(`Digest confirmation must exactly match ${plan.digest}.`)
-        if (options.confirmVersion !== plan.version) throw new Error(`Confirmation must exactly match ${plan.version}.`)
         if (!options.send) throw new Error('--send is required for the release announcement.')
         const webhook = process.env.GOOGLE_CHAT_WEBHOOK_URL
         if (!webhook) throw new Error('GOOGLE_CHAT_WEBHOOK_URL is required for the release announcement.')
-        const github = runtime.createGitHubClient()
-        const [website, dashboard] = await Promise.all([
-          github.getRelease(plan.repositories.website.repository, plan.version),
-          github.getRelease(plan.repositories.dashboard.repository, plan.version),
+        const [config, manifestFile] = await Promise.all([
+          loadPlatformReleaseConfig(options.configPath),
+          readPlatformReleaseManifest(options.manifest),
         ])
-        if (!website || !dashboard) throw new Error('Both application releases must exist before announcement.')
+        if (options.confirmManifestDigest !== manifestFile.manifest.manifestDigest) {
+          throw new Error(`Manifest digest confirmation must exactly match ${manifestFile.manifest.manifestDigest}.`)
+        }
+        validateManifestAgainstConfig(manifestFile.manifest, config)
+        const github = runtime.createGitHubClient()
+        await Promise.all(manifestFile.manifest.components.map((component) => github.ensureReleaseManifest({
+          manifest: manifestFile.serialized,
+          repository: component.repository,
+          version: manifestFile.manifest.version,
+        })))
+        const ingested = await founderOpsClient(config).ingestManifest({
+          manifest: manifestFile.serialized,
+          manifestDigest: manifestFile.manifest.manifestDigest,
+        })
         const status = await announcePlatformReleaseOnce({
           forcePending: options.force === true,
-          notes,
-          plan,
-          releaseUrls: { dashboard: dashboard.url, website: website.url },
-          visuals: approvedReleaseVisuals(plan, notes),
+          founderOpsUrl: ingested.url,
+          manifest: manifestFile.manifest,
           webhook,
         }, github)
-        writeJson({ status, version: plan.version }, runtime.writeStdout)
+        writeJson({ founderOps: ingested, status, version: manifestFile.manifest.version }, runtime.writeStdout)
       } catch (error) {
         writeError(error, options.json, runtime)
       }

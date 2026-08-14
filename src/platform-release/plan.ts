@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
+import { canonicalJson, sha256 } from './canonical.js'
 import { assertManualVersion, compareVersions, highestBump, nextVersion } from './semver.js'
 import { boundedVisualCandidates } from './visuals.js'
 import type {
@@ -14,25 +14,18 @@ import type {
 
 const REPOSITORY_KEYS: PlatformRepositoryKey[] = ['dashboard', 'website']
 
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue)
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, entry]) => [key, stableValue(entry)]),
-    )
-  }
-  return value
-}
-
 export function computePlanDigest(plan: Omit<PlatformReleasePlan, 'digest'> | PlatformReleasePlan): string {
   const { createdAt: _createdAt, digest: _digest, ...durable } = plan as PlatformReleasePlan
-  return createHash('sha256').update(JSON.stringify(stableValue(durable))).digest('hex')
+  return sha256(canonicalJson(durable))
 }
 
 export function validatePlatformReleasePlan(plan: PlatformReleasePlan): void {
-  if (plan.schemaVersion !== 1) throw new Error('Unsupported platform release plan schema.')
+  if (plan.schemaVersion !== 2) throw new Error('Unsupported platform release plan schema.')
+  for (const key of REPOSITORY_KEYS) {
+    if (!plan.repositories[key]?.pullRequests.every((pullRequest) => Array.isArray(pullRequest.commitShas))) {
+      throw new Error(`Platform release plan ${key} pull request provenance is incomplete.`)
+    }
+  }
   const expected = computePlanDigest(plan)
   if (plan.digest !== expected) throw new Error(`Platform release plan digest mismatch: expected ${expected}.`)
 }
@@ -142,7 +135,7 @@ export async function createPlatformReleasePlan(
     highestBump: bump,
     manualVersion: input.manualVersion !== undefined,
     repositories,
-    schemaVersion: 1,
+    schemaVersion: 2,
     version,
     visualCandidates: boundedVisualCandidates(Object.values(repositories).flatMap((repository) =>
       repository.pullRequests.flatMap((pullRequest) => pullRequest.visuals))),

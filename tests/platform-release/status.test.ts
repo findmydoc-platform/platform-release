@@ -15,7 +15,7 @@ function plan(): PlatformReleasePlan {
       dashboard: repository('findmydoc-platform/clinic-dashboard', 'dashboard-target'),
       website: repository('findmydoc-platform/website', 'website-target'),
     },
-    schemaVersion: 1, version: 'v0.45.1', visualCandidates: [],
+    schemaVersion: 2, version: 'v0.45.1', visualCandidates: [],
   }
   return { ...value, digest: computePlanDigest(value) }
 }

@@ -1,11 +1,7 @@
 import type {
   PlatformReleaseGitHubClient,
-  PlatformReleasePlan,
-  PlatformRepositoryKey,
-  ReleaseVisual,
+  PlatformReleaseManifestV2,
 } from './types.js'
-
-const REPOSITORY_KEYS: PlatformRepositoryKey[] = ['dashboard', 'website']
 
 function webhookUrl(raw: string, threadKey: string): URL {
   const url = new URL(raw)
@@ -14,78 +10,64 @@ function webhookUrl(raw: string, threadKey: string): URL {
   return url
 }
 
-async function send(webhook: string, threadKey: string, body: unknown, fetchImpl: typeof fetch): Promise<void> {
-  const response = await fetchImpl(webhookUrl(webhook, threadKey), {
-    body: JSON.stringify(body),
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+export async function announcePlatformRelease(
+  input: {
+    founderOpsUrl: string
+    manifest: PlatformReleaseManifestV2
+    webhook: string
+  },
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const response = await fetchImpl(webhookUrl(input.webhook, `platform-release-${input.manifest.version.replace(/^v/, '')}`), {
+    body: JSON.stringify({
+      cardsV2: [{
+        cardId: `platform-release-${input.manifest.version}`,
+        card: {
+          header: { title: `findmydoc ${input.manifest.version}` },
+          sections: [{
+            widgets: [
+              { textParagraph: { text: `${escapeHtml(input.manifest.summary)}<br><br><b>Enthalten:</b> Website · Clinic Dashboard` } },
+              { buttonList: { buttons: [{
+                onClick: { openLink: { url: input.founderOpsUrl } },
+                text: 'Release in FounderOps öffnen',
+              }] } },
+            ],
+          }],
+        },
+      }],
+    }),
     headers: { 'content-type': 'application/json' },
     method: 'POST',
   })
   if (!response.ok) throw new Error(`Google Chat release announcement failed with HTTP ${response.status}.`)
 }
 
-function visualCard(visual: ReleaseVisual): unknown {
-  return {
-    cardsV2: [{
-      cardId: `release-visual-${visual.pullRequestNumber}`,
-      card: {
-        header: { title: visual.label || visual.altText || 'Release visual' },
-        sections: [{ widgets: [{ image: { altText: visual.altText || visual.label, imageUrl: visual.url } }] }],
-      },
-    }],
-  }
-}
-
-export async function announcePlatformRelease(
-  input: {
-    notes: string
-    plan: PlatformReleasePlan
-    releaseUrls: { dashboard: string; website: string }
-    visuals: ReleaseVisual[]
-    webhook: string
-  },
-  fetchImpl: typeof fetch = fetch,
-): Promise<void> {
-  const threadKey = `platform-release-${input.plan.version.replace(/^v/, '')}`
-  await send(input.webhook, threadKey, {
-    cardsV2: [{
-      cardId: `platform-release-${input.plan.version}`,
-      card: {
-        header: { subtitle: 'Website and dashboard', title: `findmydoc ${input.plan.version}` },
-        sections: [{
-          widgets: [
-            { textParagraph: { text: input.notes.replace(/<!--[\s\S]*?-->/g, '').trim().replace(/\n/g, '<br>') } },
-            { buttonList: { buttons: [
-              { text: 'Public platform release', onClick: { openLink: { url: input.releaseUrls.website } } },
-              { text: 'Dashboard release', onClick: { openLink: { url: input.releaseUrls.dashboard } } },
-            ] } },
-          ],
-        }],
-      },
-    }],
-  }, fetchImpl)
-
-  for (const visual of input.visuals) {
-    await send(input.webhook, threadKey, visualCard(visual), fetchImpl)
-  }
-}
-
 export async function announcePlatformReleaseOnce(
   input: {
     forcePending?: boolean
-    notes: string
-    plan: PlatformReleasePlan
-    releaseUrls: { dashboard: string; website: string }
-    visuals: ReleaseVisual[]
+    founderOpsUrl: string
+    manifest: PlatformReleaseManifestV2
     webhook: string
   },
   github: PlatformReleaseGitHubClient,
   fetchImpl: typeof fetch = fetch,
 ): Promise<'already_sent' | 'sent'> {
-  const details = await Promise.all(REPOSITORY_KEYS.map(async (key) => {
-    const repository = input.plan.repositories[key]
-    const release = await github.getRelease(repository.repository, input.plan.version)
-    if (!release) throw new Error(`${repository.repository} ${input.plan.version} must exist before announcement.`)
-    return { key, release, repository: repository.repository }
+  const details = await Promise.all(input.manifest.components.map(async (component) => {
+    const release = await github.getRelease(component.repository, input.manifest.version)
+    if (!release) throw new Error(`${component.repository} ${input.manifest.version} must exist before announcement.`)
+    if (release.sha !== component.targetSha || release.url !== component.release) {
+      throw new Error(`${component.repository} release does not match the approved platform manifest.`)
+    }
+    return { release, repository: component.repository }
   }))
 
   if (details.some(({ release }) => release.announcementState === 'sent')) {
@@ -94,7 +76,7 @@ export async function announcePlatformReleaseOnce(
       .map(({ repository }) => github.setReleaseAnnouncementState({
         repository,
         state: 'sent',
-        version: input.plan.version,
+        version: input.manifest.version,
       })))
     return 'already_sent'
   }
@@ -105,13 +87,13 @@ export async function announcePlatformReleaseOnce(
   await Promise.all(details.map(({ repository }) => github.setReleaseAnnouncementState({
     repository,
     state: 'pending',
-    version: input.plan.version,
+    version: input.manifest.version,
   })))
   await announcePlatformRelease(input, fetchImpl)
   await Promise.all(details.map(({ repository }) => github.setReleaseAnnouncementState({
     repository,
     state: 'sent',
-    version: input.plan.version,
+    version: input.manifest.version,
   })))
   return 'sent'
 }

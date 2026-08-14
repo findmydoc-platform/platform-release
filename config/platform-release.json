@@ -1,11 +1,16 @@
 {
   "schemaVersion": 1,
   "platformBaselineVersion": "v0.45.0",
+  "founderOps": {
+    "baseUrl": "https://founder-ops.findmydoc.eu",
+    "ingestPath": "/api/team/platform-releases/v1/releases"
+  },
   "repositories": {
     "website": {
       "repository": "findmydoc-platform/website",
       "branch": "main",
       "deploymentWorkflow": "platform-release-deploy.yml",
+      "displayName": "Website",
       "surface": "Public platform",
       "productionUrl": "https://findmydoc.eu"
     },
@@ -13,6 +18,7 @@
       "repository": "findmydoc-platform/clinic-dashboard",
       "branch": "main",
       "deploymentWorkflow": "platform-release-deploy.yml",
+      "displayName": "Clinic Dashboard",
       "surface": "Dashboard for clinics",
       "productionUrl": "https://clinics.findmydoc.eu",
       "cutoverSha": "ac6b91fe06e469b195f22f317301346ba880114f"
