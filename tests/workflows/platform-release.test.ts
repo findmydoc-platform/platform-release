@@ -30,6 +30,9 @@ describe('platform release workflows', () => {
     expect(workflow).toContain('FOUNDEROPS_PLATFORM_RELEASE_TOKEN: ${{ secrets.FOUNDEROPS_PLATFORM_RELEASE_TOKEN }}')
     expect(workflow).toContain('Verify plan artifact provenance')
     expect(workflow).toContain('test "$source_branch" = "main"')
+    expect(workflow).toContain('compare/${source_head_sha}...${CURRENT_SHA}')
+    expect(workflow).toContain('identical | ahead')
+    expect(workflow).not.toContain('test "$source_head_sha" = "$CURRENT_SHA"')
   })
 
   it.each([
@@ -48,5 +51,7 @@ describe('platform release workflows', () => {
     const workflow = await readWorkflow('reusable-deploy-dashboard.yml')
     expect(workflow).toContain('pnpm exec playwright install --with-deps chromium')
     expect(workflow).toContain('pnpm test:all')
+    expect(workflow).toContain('pull --yes --environment=production --token="$VERCEL_TOKEN"')
+    expect(workflow).not.toContain('--environment=production --git-branch')
   })
 })
