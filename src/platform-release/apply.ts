@@ -163,11 +163,13 @@ export async function applyPlatformRelease(
   })
   const serializedManifest = serializePlatformReleaseManifest(manifest)
   await input.onManifest?.(serializedManifest)
-  await Promise.all(REPOSITORY_KEYS.map((key) => github.ensureReleaseManifest({
-    manifest: serializedManifest,
-    repository: input.plan.repositories[key].repository,
-    version: input.plan.version,
-  })))
+  for (const key of REPOSITORY_KEYS) {
+    await github.ensureReleaseManifest({
+      manifest: serializedManifest,
+      repository: input.plan.repositories[key].repository,
+      version: input.plan.version,
+    })
+  }
   const founderOpsResult = await founderOps.ingestManifest({
     manifest: serializedManifest,
     manifestDigest: manifest.manifestDigest,

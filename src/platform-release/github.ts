@@ -71,6 +71,16 @@ class GhError extends Error {
   }
 }
 
+export function safeGhErrorDetail(error: unknown): string {
+  const message = error instanceof GhError ? error.stderr : error instanceof Error ? error.message : String(error)
+  return message
+    .replace(/\bgh[a-z]_[A-Za-z0-9_]+\b/g, '[redacted]')
+    .replace(/(authorization:\s*(?:bearer|token)\s+)\S+/gi, '$1[redacted]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 1_000)
+}
+
 export function githubChildEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const allowlist = [
     'APPDATA',
@@ -394,7 +404,14 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     const path = join(directory, 'platform-release.json')
     try {
       await writeFile(path, input.manifest, 'utf8')
-      await runGh(['release', 'upload', input.version, path, '--repo', input.repository])
+      try {
+        await runGh(['release', 'upload', input.version, path, '--repo', input.repository])
+      } catch (error) {
+        const detail = safeGhErrorDetail(error)
+        throw new Error(
+          `Failed to upload platform-release.json to ${input.repository} ${input.version}${detail ? `: ${detail}` : '.'}`,
+        )
+      }
     } finally {
       await rm(directory, { force: true, recursive: true })
     }

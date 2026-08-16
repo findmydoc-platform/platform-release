@@ -221,11 +221,13 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
         }
         validateManifestAgainstConfig(manifestFile.manifest, config)
         const github = runtime.createGitHubClient()
-        await Promise.all(manifestFile.manifest.components.map((component) => github.ensureReleaseManifest({
-          manifest: manifestFile.serialized,
-          repository: component.repository,
-          version: manifestFile.manifest.version,
-        })))
+        for (const component of manifestFile.manifest.components) {
+          await github.ensureReleaseManifest({
+            manifest: manifestFile.serialized,
+            repository: component.repository,
+            version: manifestFile.manifest.version,
+          })
+        }
         const ingested = await founderOpsClient(config).ingestManifest({
           manifest: manifestFile.serialized,
           manifestDigest: manifestFile.manifest.manifestDigest,
