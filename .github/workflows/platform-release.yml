@@ -6,13 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Create a frozen plan or apply an existing plan artifact
+        description: Create, apply, or recover a frozen platform release
         required: true
         default: plan
         type: choice
         options:
           - plan
           - apply
+          - recover
       manual_version:
         description: Optional manual vX.Y.Z decision for plan mode
         required: false
@@ -35,6 +36,10 @@ on:
         type: string
       confirm_content_digest:
         description: Exact structured content digest required for apply mode
+        required: false
+        type: string
+      recovery_confirmation:
+        description: Exact recover JSON with manifest digest and confirmed legacy repository state
         required: false
         type: string
       announce:
@@ -282,3 +287,168 @@ jobs:
           path: artifacts/platform-release/platform-release.json
           if-no-files-found: ignore
           retention-days: 30
+
+  recover:
+    name: Recover frozen platform release handoff
+    if: inputs.mode == 'recover'
+    needs: trusted-ref
+    permissions:
+      actions: read
+      contents: read
+      deployments: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production-platform
+    steps:
+      - name: Validate recovery inputs
+        id: recovery-inputs
+        env:
+          CONFIRM_CONTENT_DIGEST: ${{ inputs.confirm_content_digest }}
+          CONFIRM_DIGEST: ${{ inputs.confirm_digest }}
+          CONFIRM_VERSION: ${{ inputs.confirm_version }}
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          RECOVERY_CONFIRMATION: ${{ inputs.recovery_confirmation }}
+          RELEASE_CONTENT: ${{ inputs.release_content }}
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$CONFIRM_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$CONFIRM_CONTENT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$CONFIRM_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(jq -c 'keys | sort' <<< "$RECOVERY_CONFIRMATION")" = '["manifestDigest","missingManifestRepository","missingPlatformPublishedAt","mutableManifestRepository"]'
+          confirm_manifest_digest="$(jq -er '.manifestDigest | select(test("^[0-9a-f]{64}$"))' <<< "$RECOVERY_CONFIRMATION")"
+          confirm_missing_manifest_repository="$(jq -er '.missingManifestRepository' <<< "$RECOVERY_CONFIRMATION")"
+          confirm_mutable_manifest_repository="$(jq -er '.mutableManifestRepository' <<< "$RECOVERY_CONFIRMATION")"
+          confirm_missing_platform_published_at="$(jq -er '.missingPlatformPublishedAt' <<< "$RECOVERY_CONFIRMATION")"
+          test "$confirm_missing_manifest_repository" = "findmydoc-platform/clinic-dashboard"
+          test "$confirm_mutable_manifest_repository" = "findmydoc-platform/website"
+          test "$confirm_missing_platform_published_at" = "true"
+          test -n "$RELEASE_CONTENT"
+          {
+            echo "manifest_digest=$confirm_manifest_digest"
+            echo "missing_manifest_repository=$confirm_missing_manifest_repository"
+            echo "mutable_manifest_repository=$confirm_mutable_manifest_repository"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify trusted automation checkout
+        env:
+          TRUSTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$TRUSTED_SHA"
+
+      - name: Create read-only cross-repository token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.PLATFORM_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}
+          owner: findmydoc-platform
+          permission-actions: read
+          permission-contents: read
+          repositories: |
+            website
+            clinic-dashboard
+
+      - name: Verify plan artifact provenance
+        env:
+          CURRENT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+        run: |
+          set -euo pipefail
+          IFS=$'\t' read -r source_event source_conclusion source_branch source_path source_head_sha <<< "$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PLAN_RUN_ID}" \
+              --jq '[.event, .conclusion, .head_branch, .path, .head_sha] | @tsv'
+          )"
+          test "$source_event" = "workflow_dispatch"
+          test "$source_conclusion" = "success"
+          test "$source_branch" = "main"
+          [[ "$source_path" == ".github/workflows/platform-release.yml"* ]]
+          [[ "$source_head_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CURRENT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          comparison_status="$(
+            gh api "repos/${GITHUB_REPOSITORY}/compare/${source_head_sha}...${CURRENT_SHA}" \
+              --jq '.status'
+          )"
+          case "$comparison_status" in
+            identical | ahead) ;;
+            *)
+              echo "Plan workflow commit is not an ancestor of the current automation main commit." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Download frozen plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          name: platform-release-plan
+          path: artifacts/platform-release
+          run-id: ${{ inputs.plan_run_id }}
+
+      - name: Write approved release content
+        env:
+          RELEASE_CONTENT: ${{ inputs.release_content }}
+        run: node --input-type=module -e "import { writeFileSync } from 'node:fs'; writeFileSync('artifacts/platform-release/release-content.json', process.env.RELEASE_CONTENT + '\n')"
+
+      - name: Download canonical manifest from complete release
+        env:
+          CONFIRM_MUTABLE_MANIFEST_REPOSITORY: ${{ steps.recovery-inputs.outputs.mutable_manifest_repository }}
+          CONFIRM_VERSION: ${{ inputs.confirm_version }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$CONFIRM_VERSION" \
+            --repo "$CONFIRM_MUTABLE_MANIFEST_REPOSITORY" \
+            --pattern platform-release.json \
+            --dir artifacts/platform-release/recovery
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          cache: pnpm
+          node-version: ${{ env.NODE_VERSION }}
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Recover FounderOps handoff and announcement
+        env:
+          CONFIRM_CONTENT_DIGEST: ${{ inputs.confirm_content_digest }}
+          CONFIRM_DIGEST: ${{ inputs.confirm_digest }}
+          CONFIRM_MANIFEST_DIGEST: ${{ steps.recovery-inputs.outputs.manifest_digest }}
+          CONFIRM_MISSING_MANIFEST_REPOSITORY: ${{ steps.recovery-inputs.outputs.missing_manifest_repository }}
+          CONFIRM_MUTABLE_MANIFEST_REPOSITORY: ${{ steps.recovery-inputs.outputs.mutable_manifest_repository }}
+          CONFIRM_VERSION: ${{ inputs.confirm_version }}
+          FOUNDEROPS_PLATFORM_RELEASE_TOKEN: ${{ secrets.FOUNDEROPS_PLATFORM_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_STATE_TOKEN: ${{ github.token }}
+          GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+          SEND_ANNOUNCEMENT: ${{ inputs.announce }}
+        run: |
+          set -euo pipefail
+          args=(
+            recover
+            --plan artifacts/platform-release/plan.json
+            --content artifacts/platform-release/release-content.json
+            --manifest artifacts/platform-release/recovery/platform-release.json
+            --confirm-version "$CONFIRM_VERSION"
+            --confirm-digest "$CONFIRM_DIGEST"
+            --confirm-content-digest "$CONFIRM_CONTENT_DIGEST"
+            --confirm-manifest-digest "$CONFIRM_MANIFEST_DIGEST"
+            --confirm-missing-manifest-repository "$CONFIRM_MISSING_MANIFEST_REPOSITORY"
+            --confirm-mutable-manifest-repository "$CONFIRM_MUTABLE_MANIFEST_REPOSITORY"
+            --confirm-missing-platform-published-at
+            --apply
+            --json
+          )
+          if [[ "$SEND_ANNOUNCEMENT" == "true" ]]; then
+            args+=(--announce)
+          fi
+          pnpm platform-release "${args[@]}"
