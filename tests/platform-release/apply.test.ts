@@ -82,6 +82,7 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
     id: number
     immutable: boolean
     manifestAttached: boolean
+    platformPublishedAt?: string
     preparedAt: string
     publishedAt?: string
     sha: string
@@ -123,6 +124,15 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
     this.releaseDetails.set(input.repository, published)
     this.events.push(`publish:${input.repository}`)
     return published
+  }
+  async setReleasePlatformPublishedAt(input: { platformPublishedAt: string; repository: string }) {
+    const details = this.releaseDetails.get(input.repository)
+    if (!details) throw new Error('release does not exist')
+    const updated = { ...details,
+      body: `${details.body.trim()}\n\n<!-- findmydoc-platform-published-at:${input.platformPublishedAt} -->\n`,
+      platformPublishedAt: input.platformPublishedAt }
+    this.releaseDetails.set(input.repository, updated)
+    return updated
   }
   async ensureReleaseManifest(input: { manifest: string; repository: string }) {
     this.manifestCallsInFlight += 1
@@ -182,10 +192,13 @@ describe('platform release apply', () => {
   it('uploads byte-identical manifests before FounderOps ingestion', async () => {
     const github = new ApplyGitHub()
     const founderOps = new FounderOps(github.events)
-    const result = await applyPlatformRelease(applyInput(), github, founderOps, announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
+    const result = await applyPlatformRelease(applyInput(), github, founderOps, announcementStore, {
+      now: () => new Date('2026-08-12T11:59:30.000Z'), pollIntervalMs: 0, timeoutMs: 100,
+    })
     expect(github.dispatches).toEqual(['findmydoc-platform/clinic-dashboard', 'findmydoc-platform/website'])
     expect(github.manifests).toHaveLength(2)
     expect(github.manifests[0]).toBe(github.manifests[1])
+    expect(JSON.parse(github.manifests[0] ?? '{}')).toMatchObject({ publishedAt: '2026-08-12T11:59:30.000Z' })
     expect(github.maxManifestCallsInFlight).toBe(1)
     expect(github.events.indexOf('publish:findmydoc-platform/clinic-dashboard'))
       .toBeGreaterThan(github.events.lastIndexOf('manifest:findmydoc-platform/website'))

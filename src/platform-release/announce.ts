@@ -52,6 +52,20 @@ export async function announcePlatformRelease(
   if (!response.ok) throw new Error(`Google Chat release announcement failed with HTTP ${response.status}.`)
 }
 
+export async function assertPublishedPlatformRelease(
+  manifest: PlatformReleaseManifestV2,
+  github: PlatformReleaseGitHubClient,
+): Promise<void> {
+  await Promise.all(manifest.components.map(async (component) => {
+    const release = await github.getRelease(component.repository, manifest.version)
+    if (!release) throw new Error(`${component.repository} ${manifest.version} must exist before announcement.`)
+    if (release.draft || !release.publishedAt || !release.manifestAttached ||
+      release.sha !== component.targetSha || release.url !== component.release) {
+      throw new Error(`${component.repository} release does not match the approved platform manifest.`)
+    }
+  }))
+}
+
 export async function announcePlatformReleaseOnce(
   input: {
     forcePending?: boolean
@@ -63,14 +77,7 @@ export async function announcePlatformReleaseOnce(
   announcementStore: PlatformReleaseAnnouncementStore,
   fetchImpl: typeof fetch = fetch,
 ): Promise<'already_sent' | 'sent'> {
-  await Promise.all(input.manifest.components.map(async (component) => {
-    const release = await github.getRelease(component.repository, input.manifest.version)
-    if (!release) throw new Error(`${component.repository} ${input.manifest.version} must exist before announcement.`)
-    if (release.draft || !release.publishedAt || !release.manifestAttached ||
-      release.sha !== component.targetSha || release.url !== component.release) {
-      throw new Error(`${component.repository} release does not match the approved platform manifest.`)
-    }
-  }))
+  await assertPublishedPlatformRelease(input.manifest, github)
 
   const state = await announcementStore.getState(input.manifest.manifestDigest)
   if (state === 'sent') return 'already_sent'

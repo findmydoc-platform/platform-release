@@ -36,9 +36,11 @@ describe('platform release manifest v2', () => {
     const manifest = createPlatformReleaseManifest({
       config, content, contentDigest: 'b'.repeat(64), plan,
       releases: {
-        dashboard: { body: '', draft: true, id: 1, immutable: false, manifestAttached: false, preparedAt: '2026-08-12T11:00:00Z',
+        dashboard: { body: '', draft: true, id: 1, immutable: false, manifestAttached: false,
+          platformPublishedAt: '2026-08-12T12:00:00.000Z', preparedAt: '2026-08-12T11:00:00Z',
           sha: 'dashboard-sha', url: 'https://github.com/org/dashboard/releases/v0.46.0' },
-        website: { body: '', draft: true, id: 2, immutable: false, manifestAttached: false, preparedAt: '2026-08-12T12:00:00Z',
+        website: { body: '', draft: true, id: 2, immutable: false, manifestAttached: false,
+          platformPublishedAt: '2026-08-12T12:00:00.000Z', preparedAt: '2026-08-12T12:00:00Z',
           sha: 'website-sha', url: 'https://github.com/org/website/releases/v0.46.0' },
       },
       workflows: {
@@ -46,7 +48,7 @@ describe('platform release manifest v2', () => {
         website: { conclusion: 'success', databaseId: 2, displayTitle: 'website', status: 'completed', url: 'https://github.com/run/2' },
       },
     })
-    expect(manifest).toMatchObject({ publishedAt: '2026-08-12T12:00:00Z', schemaVersion: 2, version: 'v0.46.0' })
+    expect(manifest).toMatchObject({ publishedAt: '2026-08-12T12:00:00.000Z', schemaVersion: 2, version: 'v0.46.0' })
     expect(manifest.components[1]?.pullRequests[0]).toMatchObject({ commitShas: ['website-sha'], number: 1 })
     expect(manifest.components[1]?.pullRequests[0]).not.toHaveProperty('body')
     expect(serializePlatformReleaseManifest(manifest)).toContain(`"manifestDigest": "${manifest.manifestDigest}"`)

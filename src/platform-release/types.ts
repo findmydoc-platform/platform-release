@@ -107,6 +107,7 @@ export type PlatformReleaseDetails = {
   id: number
   immutable: boolean
   manifestAttached: boolean
+  platformPublishedAt?: string
   preparedAt: string
   publishedAt?: string
   sha: string
@@ -212,6 +213,12 @@ export type PlatformReleaseGitHubClient = {
   getRelease(repository: string, version: string): Promise<PlatformReleaseDetails | undefined>
   isAncestor(repository: string, ancestor: string, branch: string): Promise<boolean>
   publishRelease(input: { repository: string; releaseId: number; version: string }): Promise<PlatformReleaseDetails>
+  setReleasePlatformPublishedAt(input: {
+    platformPublishedAt: string
+    releaseId: number
+    repository: string
+    version: string
+  }): Promise<PlatformReleaseDetails>
   ensureReleaseManifest(input: {
     manifest: string
     repository: string

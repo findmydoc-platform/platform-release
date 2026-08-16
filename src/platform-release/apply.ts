@@ -19,7 +19,13 @@ import type {
 } from './types.js'
 
 const REPOSITORY_KEYS: PlatformRepositoryKey[] = ['dashboard', 'website']
-const ANNOUNCEMENT_MARKER = /\n*<!--\s*findmydoc-platform-announcement:(?:pending|sent)\s*-->\s*$/
+const RELEASE_METADATA_MARKER = /\n*<!--\s*findmydoc-platform-(?:announcement:(?:pending|sent)|published-at:[^\s>]+)\s*-->\s*$/
+
+function releaseNotesBody(body: string): string {
+  let value = body
+  while (RELEASE_METADATA_MARKER.test(value)) value = value.replace(RELEASE_METADATA_MARKER, '')
+  return value.trim()
+}
 
 const delay = (milliseconds: number) => new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds))
 
@@ -101,7 +107,7 @@ export async function applyPlatformRelease(
   github: PlatformReleaseGitHubClient,
   founderOps: FounderOpsReleaseClient,
   announcementStore: PlatformReleaseAnnouncementStore,
-  options: { pollIntervalMs?: number; timeoutMs?: number } = {},
+  options: { now?: () => Date; pollIntervalMs?: number; timeoutMs?: number } = {},
 ): Promise<PlatformReleaseApplyResult> {
   validatePlatformReleasePlan(input.plan)
   validatePlanAgainstConfig(input.plan, input.config)
@@ -146,7 +152,7 @@ export async function applyPlatformRelease(
         `${repository.repository} ${input.plan.version} is immutable and missing platform-release.json; publish a new platform version after fixing the runner.`,
       )
     }
-    if (existing && existing.body.replace(ANNOUNCEMENT_MARKER, '').trim() !== expectedBody.trim()) {
+    if (existing && releaseNotesBody(existing.body) !== expectedBody.trim()) {
       throw new Error(`${repository.repository} ${input.plan.version} release notes do not match the approved content.`)
     }
     const release = existing ?? await github.createDraftRelease({
@@ -158,6 +164,25 @@ export async function applyPlatformRelease(
     releaseEntries.push([key, release])
   }
   const releaseDetails = Object.fromEntries(releaseEntries) as Record<PlatformRepositoryKey, Awaited<ReturnType<PlatformReleaseGitHubClient['createDraftRelease']>>>
+  const existingPlatformPublishedAt = [...new Set(REPOSITORY_KEYS.flatMap((key) =>
+    releaseDetails[key].platformPublishedAt ? [releaseDetails[key].platformPublishedAt] : []))]
+  if (existingPlatformPublishedAt.length > 1) {
+    throw new Error(`${input.plan.version} releases have conflicting platform publication metadata.`)
+  }
+  const platformPublishedAt = existingPlatformPublishedAt[0] ?? (options.now ?? (() => new Date()))().toISOString()
+  for (const key of REPOSITORY_KEYS) {
+    const release = releaseDetails[key]
+    if (release.platformPublishedAt === platformPublishedAt) continue
+    if (!release.draft) {
+      throw new Error(`${input.plan.repositories[key].repository} ${input.plan.version} is published without stable platform publication metadata.`)
+    }
+    releaseDetails[key] = await github.setReleasePlatformPublishedAt({
+      platformPublishedAt,
+      releaseId: release.id,
+      repository: input.plan.repositories[key].repository,
+      version: input.plan.version,
+    })
+  }
 
   const manifest = createPlatformReleaseManifest({
     config: input.config,
@@ -179,12 +204,15 @@ export async function applyPlatformRelease(
   for (const key of REPOSITORY_KEYS) {
     const release = releaseDetails[key]
     if (release.draft) {
-      releaseDetails[key] = await github.publishRelease({
+      await github.publishRelease({
         releaseId: release.id,
         repository: input.plan.repositories[key].repository,
         version: input.plan.version,
       })
     }
+    const published = await github.getRelease(input.plan.repositories[key].repository, input.plan.version)
+    if (!published) throw new Error(`${input.plan.repositories[key].repository} ${input.plan.version} is missing after publication.`)
+    releaseDetails[key] = published
     if (releaseDetails[key].draft || !releaseDetails[key].publishedAt || !releaseDetails[key].manifestAttached) {
       throw new Error(`${input.plan.repositories[key].repository} ${input.plan.version} is not published with its manifest.`)
     }

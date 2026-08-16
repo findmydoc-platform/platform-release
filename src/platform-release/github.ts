@@ -54,6 +54,14 @@ type GitHubApiOptions = { method?: string; body?: unknown }
 type GitHubApiRequest = <T>(path: string, options?: GitHubApiOptions) => Promise<T>
 
 const WORKFLOW_RUNS_PAGE_SIZE = 100
+const PLATFORM_PUBLISHED_AT_MARKER = /<!--\s*findmydoc-platform-published-at:([^\s>]+)\s*-->/
+
+function platformPublishedAt(body: string | null | undefined): string | undefined {
+  const value = body?.match(PLATFORM_PUBLISHED_AT_MARKER)?.[1]
+  if (!value) return undefined
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.valueOf()) || parsed.toISOString() !== value ? undefined : value
+}
 
 export async function findWorkflowRunInPages(
   title: string,
@@ -195,6 +203,7 @@ async function platformReleaseDetails(
     id: release.id,
     immutable: release.immutable === true,
     manifestAttached: release.assets?.some((asset) => asset.name === 'platform-release.json') === true,
+    platformPublishedAt: platformPublishedAt(release.body),
     preparedAt: release.created_at,
     publishedAt: release.published_at ?? undefined,
     sha,
@@ -412,6 +421,35 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     const details = await platformReleaseDetails(input.repository, input.version, release)
     if (details.draft || !details.publishedAt) {
       throw new Error(`GitHub did not publish ${input.repository} ${input.version}.`)
+    }
+    return details
+  }
+
+  async setReleasePlatformPublishedAt(input: {
+    platformPublishedAt: string
+    releaseId: number
+    repository: string
+    version: string
+  }): Promise<PlatformReleaseDetails> {
+    const current = await api<GitHubRelease>(`repos/${input.repository}/releases/${input.releaseId}`)
+    if (current.draft !== true) {
+      throw new Error(`${input.repository} ${input.version} is already published without stable platform publication metadata.`)
+    }
+    const existing = platformPublishedAt(current.body)
+    if (existing && existing !== input.platformPublishedAt) {
+      throw new Error(`${input.repository} ${input.version} has conflicting platform publication metadata.`)
+    }
+    if (existing === input.platformPublishedAt) {
+      return platformReleaseDetails(input.repository, input.version, current)
+    }
+    const body = `${(current.body ?? '').trim()}\n\n<!-- findmydoc-platform-published-at:${input.platformPublishedAt} -->\n`
+    const release = await api<GitHubRelease>(`repos/${input.repository}/releases/${input.releaseId}`, {
+      body: { body },
+      method: 'PATCH',
+    })
+    const details = await platformReleaseDetails(input.repository, input.version, release)
+    if (details.platformPublishedAt !== input.platformPublishedAt) {
+      throw new Error(`GitHub did not preserve platform publication metadata for ${input.repository} ${input.version}.`)
     }
     return details
   }

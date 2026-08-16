@@ -3,7 +3,7 @@ import { Command } from 'commander'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { announcePlatformReleaseOnce } from './platform-release/announce.js'
+import { announcePlatformReleaseOnce, assertPublishedPlatformRelease } from './platform-release/announce.js'
 import { applyPlatformRelease } from './platform-release/apply.js'
 import {
   computeReleaseContentDigest,
@@ -227,6 +227,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
         }
         validateManifestAgainstConfig(manifestFile.manifest, config)
         const github = runtime.createGitHubClient()
+        await assertPublishedPlatformRelease(manifestFile.manifest, github)
         for (const component of manifestFile.manifest.components) {
           await github.ensureReleaseManifest({
             manifest: manifestFile.serialized,

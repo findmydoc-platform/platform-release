@@ -60,6 +60,7 @@ class PlanningGitHub implements PlatformReleaseGitHubClient {
   async getRelease() { return undefined }
   async ensureReleaseManifest() { throw new Error('not used') }
   async publishRelease() { throw new Error('not used') }
+  async setReleasePlatformPublishedAt() { throw new Error('not used') }
 }
 
 describe('platform release planning', () => {

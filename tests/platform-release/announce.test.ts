@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { announcePlatformReleaseOnce } from '../../src/platform-release/announce.js'
+import { announcePlatformReleaseOnce, assertPublishedPlatformRelease } from '../../src/platform-release/announce.js'
 import type {
   PlatformReleaseAnnouncementStore,
   PlatformReleaseGitHubClient,
@@ -51,6 +51,17 @@ const input = () => ({
 })
 
 describe('platform release announcement resume', () => {
+  it('rejects a draft before FounderOps or Google Chat can run', async () => {
+    const { client } = announcementGitHub()
+    client.getRelease = async (repository: string) => {
+      const component = manifest().components.find((entry) => entry.repository === repository)!
+      return { body: '', draft: true, id: 1, immutable: false, manifestAttached: true,
+        platformPublishedAt: '2026-08-12T12:00:00.000Z', preparedAt: '2026-08-12T11:59:00Z',
+        sha: component.targetSha, url: component.release }
+    }
+    await expect(assertPublishedPlatformRelease(manifest(), client)).rejects.toThrow('does not match')
+  })
+
   it('sends only the compact German card and persists sent state', async () => {
     const { client, states, store } = announcementGitHub()
     const fetchMock = vi.fn(async () => new Response(null, { status: 200 }))
