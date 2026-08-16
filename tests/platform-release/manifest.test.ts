@@ -36,8 +36,10 @@ describe('platform release manifest v2', () => {
     const manifest = createPlatformReleaseManifest({
       config, content, contentDigest: 'b'.repeat(64), plan,
       releases: {
-        dashboard: { body: '', id: 1, publishedAt: '2026-08-12T11:00:00Z', sha: 'dashboard-sha', url: 'https://github.com/org/dashboard/releases/v0.46.0' },
-        website: { body: '', id: 2, publishedAt: '2026-08-12T12:00:00Z', sha: 'website-sha', url: 'https://github.com/org/website/releases/v0.46.0' },
+        dashboard: { body: '', draft: true, id: 1, immutable: false, preparedAt: '2026-08-12T11:00:00Z',
+          sha: 'dashboard-sha', url: 'https://github.com/org/dashboard/releases/v0.46.0' },
+        website: { body: '', draft: true, id: 2, immutable: false, preparedAt: '2026-08-12T12:00:00Z',
+          sha: 'website-sha', url: 'https://github.com/org/website/releases/v0.46.0' },
       },
       workflows: {
         dashboard: { conclusion: 'success', databaseId: 1, displayTitle: 'dashboard', status: 'completed', url: 'https://github.com/run/1' },

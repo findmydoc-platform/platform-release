@@ -54,11 +54,12 @@ class PlanningGitHub implements PlatformReleaseGitHubClient {
       : [commit('dashboard-commit', 'fix(reviews): correct moderation state')]
   }
   async getPullRequests() { return [] }
-  async createRelease() { throw new Error('not used') }
+  async createDraftRelease() { throw new Error('not used') }
   async dispatchWorkflow() { throw new Error('not used') }
   async findWorkflowRun() { return undefined }
   async getRelease() { return undefined }
   async ensureReleaseManifest() { throw new Error('not used') }
+  async publishRelease() { throw new Error('not used') }
 }
 
 describe('platform release planning', () => {

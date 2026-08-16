@@ -35,6 +35,14 @@ describe('platform release workflows', () => {
     expect(workflow).not.toContain('test "$source_head_sha" = "$CURRENT_SHA"')
   })
 
+  it('scopes GitHub-native announcement state writes to the apply job', async () => {
+    const workflow = await readWorkflow('platform-release.yml')
+    const applyJob = workflow.slice(workflow.indexOf('\n  apply:'))
+    expect(applyJob).toContain('deployments: write')
+    expect(applyJob).toContain('GITHUB_STATE_TOKEN: ${{ github.token }}')
+    expect(workflow.slice(0, workflow.indexOf('\n  apply:'))).not.toContain('deployments: write')
+  })
+
   it.each([
     'reusable-deploy-dashboard.yml',
     'reusable-deploy-website.yml',

@@ -22,8 +22,8 @@ export function createPlatformReleaseManifest(input: {
   releases: Record<PlatformRepositoryKey, PlatformReleaseDetails>
   workflows: Record<PlatformRepositoryKey, WorkflowRun>
 }): PlatformReleaseManifestV2 {
-  const publishedAt = REPOSITORY_KEYS.map((key) => input.releases[key].publishedAt).sort().at(-1)
-  if (!publishedAt) throw new Error('Both GitHub releases must include a publication timestamp.')
+  const publishedAt = REPOSITORY_KEYS.map((key) => input.releases[key].preparedAt).sort().at(-1)
+  if (!publishedAt) throw new Error('Both GitHub releases must include a stable preparation timestamp.')
   const withoutDigest: Omit<PlatformReleaseManifestV2, 'manifestDigest'> = {
     changes: input.content.changes,
     components: REPOSITORY_KEYS.map((key) => ({

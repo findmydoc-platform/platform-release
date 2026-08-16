@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { announcePlatformReleaseOnce } from '../../src/platform-release/announce.js'
 import type {
+  PlatformReleaseAnnouncementStore,
   PlatformReleaseGitHubClient,
   PlatformReleaseManifestV2,
   ReleaseAnnouncementState,
@@ -25,22 +26,22 @@ function manifest(): PlatformReleaseManifestV2 {
 
 function announcementGitHub(initial?: ReleaseAnnouncementState): {
   client: PlatformReleaseGitHubClient
-  states: Map<string, ReleaseAnnouncementState | undefined>
+  states: ReleaseAnnouncementState[]
+  store: PlatformReleaseAnnouncementStore
 } {
-  const states = new Map<string, ReleaseAnnouncementState | undefined>([
-    ['findmydoc-platform/website', initial], ['findmydoc-platform/clinic-dashboard', initial],
-  ])
+  const states: ReleaseAnnouncementState[] = initial ? [initial] : []
   const client = {
     async getRelease(repository: string) {
       const component = manifest().components.find((entry) => entry.repository === repository)!
-      return { announcementState: states.get(repository), body: '', id: 1, publishedAt: '2026-08-12T12:00:00Z',
-        sha: component.targetSha, url: component.release }
-    },
-    async setReleaseAnnouncementState(input: { repository: string; state: ReleaseAnnouncementState }) {
-      states.set(input.repository, input.state)
+      return { body: '', draft: false, id: 1, immutable: true, preparedAt: '2026-08-12T11:59:00Z',
+        publishedAt: '2026-08-12T12:00:00Z', sha: component.targetSha, url: component.release }
     },
   } as unknown as PlatformReleaseGitHubClient
-  return { client, states }
+  const store: PlatformReleaseAnnouncementStore = {
+    async getState() { return states.at(-1) },
+    async setState(input) { states.push(input.state) },
+  }
+  return { client, states, store }
 }
 
 const input = () => ({
@@ -51,9 +52,9 @@ const input = () => ({
 
 describe('platform release announcement resume', () => {
   it('sends only the compact German card and persists sent state', async () => {
-    const { client, states } = announcementGitHub()
+    const { client, states, store } = announcementGitHub()
     const fetchMock = vi.fn(async () => new Response(null, { status: 200 }))
-    await expect(announcePlatformReleaseOnce(input(), client, fetchMock)).resolves.toBe('sent')
+    await expect(announcePlatformReleaseOnce(input(), client, store, fetchMock)).resolves.toBe('sent')
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const request = fetchMock.mock.calls[0]![1] as RequestInit
     const body = JSON.parse(request.body as string) as Record<string, unknown>
@@ -64,31 +65,31 @@ describe('platform release announcement resume', () => {
     expect(serialized).toContain('https://founder-ops.findmydoc.eu/team/releases/v0.46.0')
     expect(serialized).not.toContain('imageUrl')
     expect(serialized).not.toContain('github.com/findmydoc-platform')
-    expect([...states.values()]).toEqual(['sent', 'sent'])
+    expect(states).toEqual(['pending', 'sent'])
 
-    await expect(announcePlatformReleaseOnce(input(), client, fetchMock)).resolves.toBe('already_sent')
+    await expect(announcePlatformReleaseOnce(input(), client, store, fetchMock)).resolves.toBe('already_sent')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('fails closed on an ambiguous pending announcement', async () => {
-    const { client } = announcementGitHub('pending')
+    const { client, store } = announcementGitHub('pending')
     const fetchMock = vi.fn(async () => new Response(null, { status: 200 }))
-    await expect(announcePlatformReleaseOnce(input(), client, fetchMock)).rejects.toThrow('announcement is pending')
+    await expect(announcePlatformReleaseOnce(input(), client, store, fetchMock)).rejects.toThrow('announcement is pending')
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('continues pending only with an explicit force decision', async () => {
-    const { client, states } = announcementGitHub('pending')
+    const { client, states, store } = announcementGitHub('pending')
     const fetchMock = vi.fn(async () => new Response(null, { status: 200 }))
-    await expect(announcePlatformReleaseOnce({ ...input(), forcePending: true }, client, fetchMock)).resolves.toBe('sent')
+    await expect(announcePlatformReleaseOnce({ ...input(), forcePending: true }, client, store, fetchMock)).resolves.toBe('sent')
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect([...states.values()]).toEqual(['sent', 'sent'])
+    expect(states).toEqual(['pending', 'pending', 'sent'])
   })
 
   it('leaves both releases pending when Google Chat fails', async () => {
-    const { client, states } = announcementGitHub()
+    const { client, states, store } = announcementGitHub()
     const fetchMock = vi.fn(async () => new Response(null, { status: 500 }))
-    await expect(announcePlatformReleaseOnce(input(), client, fetchMock)).rejects.toThrow('HTTP 500')
-    expect([...states.values()]).toEqual(['pending', 'pending'])
+    await expect(announcePlatformReleaseOnce(input(), client, store, fetchMock)).rejects.toThrow('HTTP 500')
+    expect(states).toEqual(['pending'])
   })
 })

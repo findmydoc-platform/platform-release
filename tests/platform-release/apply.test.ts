@@ -6,6 +6,7 @@ import type {
   FounderOpsReleaseClient,
   PlatformReleaseConfig,
   PlatformReleaseContent,
+  PlatformReleaseAnnouncementStore,
   PlatformReleaseGitHubClient,
   PlatformReleasePlan,
   ReleaseIssue,
@@ -75,10 +76,20 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
   events: string[] = []
   manifests: string[] = []
   releases: string[] = []
-  releaseDetails = new Map<string, { body: string; id: number; publishedAt: string; sha: string; url: string }>()
+  releaseDetails = new Map<string, {
+    body: string
+    draft: boolean
+    id: number
+    immutable: boolean
+    preparedAt: string
+    publishedAt?: string
+    sha: string
+    url: string
+  }>()
   createFailureRepository?: string
   failureRepository?: string
   manifestFailureRepository?: string
+  publishFailureRepository?: string
   manifestCallsInFlight = 0
   manifestByRepository = new Map<string, string>()
   lastManifestAttempt?: string
@@ -92,14 +103,24 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
   }
   async dispatchWorkflow(input: { repository: string }) { this.dispatches.push(input.repository) }
   async getRelease(repository: string) { return this.releaseDetails.get(repository) }
-  async createRelease(input: { body: string; repository: string; targetSha: string; version: string }) {
+  async createDraftRelease(input: { body: string; repository: string; targetSha: string; version: string }) {
     if (this.createFailureRepository === input.repository) throw new Error('release creation failed')
-    this.events.push(`release:${input.repository}`)
+    this.events.push(`draft:${input.repository}`)
     this.releases.push(input.repository)
-    const details = { body: input.body, id: this.releases.length, publishedAt: '2026-08-12T12:00:00Z', sha: input.targetSha,
+    const details = { body: input.body, draft: true, id: this.releases.length, immutable: false,
+      preparedAt: '2026-08-12T11:59:00Z', sha: input.targetSha,
       url: `https://github.com/${input.repository}/releases/tag/${input.version}` }
     this.releaseDetails.set(input.repository, details)
     return details
+  }
+  async publishRelease(input: { repository: string }) {
+    if (this.publishFailureRepository === input.repository) throw new Error('release publication failed')
+    const details = this.releaseDetails.get(input.repository)
+    if (!details) throw new Error('release does not exist')
+    const published = { ...details, draft: false, immutable: true, publishedAt: '2026-08-12T12:00:00Z' }
+    this.releaseDetails.set(input.repository, published)
+    this.events.push(`publish:${input.repository}`)
+    return published
   }
   async ensureReleaseManifest(input: { manifest: string; repository: string }) {
     this.manifestCallsInFlight += 1
@@ -120,7 +141,6 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
       this.manifestCallsInFlight -= 1
     }
   }
-  async setReleaseAnnouncementState() {}
   async compareCommits() { throw new Error('not used') }
   async getBranchSha() { throw new Error('not used') }
   async getLatestRelease() { throw new Error('not used') }
@@ -136,6 +156,11 @@ class FounderOps implements FounderOpsReleaseClient {
     if (this.failure) throw new Error('FounderOps failed')
     return { replayed: false, url: 'https://founder-ops.findmydoc.eu/team/releases/v0.46.0' }
   }
+}
+
+const announcementStore: PlatformReleaseAnnouncementStore = {
+  async getState() { return undefined },
+  async setState() {},
 }
 
 function applyInput(frozenPlan = plan()) {
@@ -155,11 +180,13 @@ describe('platform release apply', () => {
   it('uploads byte-identical manifests before FounderOps ingestion', async () => {
     const github = new ApplyGitHub()
     const founderOps = new FounderOps(github.events)
-    const result = await applyPlatformRelease(applyInput(), github, founderOps, { pollIntervalMs: 0, timeoutMs: 100 })
+    const result = await applyPlatformRelease(applyInput(), github, founderOps, announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
     expect(github.dispatches).toEqual(['findmydoc-platform/clinic-dashboard', 'findmydoc-platform/website'])
     expect(github.manifests).toHaveLength(2)
     expect(github.manifests[0]).toBe(github.manifests[1])
     expect(github.maxManifestCallsInFlight).toBe(1)
+    expect(github.events.indexOf('publish:findmydoc-platform/clinic-dashboard'))
+      .toBeGreaterThan(github.events.lastIndexOf('manifest:findmydoc-platform/website'))
     expect(github.events.indexOf('founderops')).toBeGreaterThan(github.events.lastIndexOf('manifest:findmydoc-platform/website'))
     expect(result).toMatchObject({ contentDigest: applyInput().confirmContentDigest, status: 'published' })
   })
@@ -167,7 +194,7 @@ describe('platform release apply', () => {
   it('publishes no release when either deployment fails', async () => {
     const github = new ApplyGitHub()
     github.failureRepository = 'findmydoc-platform/website'
-    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), { pollIntervalMs: 0, timeoutMs: 100 }))
+    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 }))
       .rejects.toThrow('deployment failed')
     expect(github.releases).toEqual([])
   })
@@ -177,7 +204,7 @@ describe('platform release apply', () => {
     const untrustedPlan = plan()
     untrustedPlan.repositories.website.deploymentWorkflow = 'branch-controlled.yml'
     untrustedPlan.digest = computePlanDigest(untrustedPlan)
-    await expect(applyPlatformRelease(applyInput(untrustedPlan), github, new FounderOps(github.events)))
+    await expect(applyPlatformRelease(applyInput(untrustedPlan), github, new FounderOps(github.events), announcementStore))
       .rejects.toThrow('does not match the trusted platform release configuration')
     expect(github.dispatches).toEqual([])
   })
@@ -185,37 +212,53 @@ describe('platform release apply', () => {
   it('resumes after the first GitHub release without recreating it', async () => {
     const github = new ApplyGitHub()
     github.createFailureRepository = 'findmydoc-platform/website'
-    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), { pollIntervalMs: 0, timeoutMs: 100 }))
+    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 }))
       .rejects.toThrow('release creation failed')
     expect(github.releases).toEqual(['findmydoc-platform/clinic-dashboard'])
 
     github.createFailureRepository = undefined
-    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), { pollIntervalMs: 0, timeoutMs: 100 })
+    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
     expect(github.releases).toEqual(['findmydoc-platform/clinic-dashboard', 'findmydoc-platform/website'])
   })
 
   it('resumes after a manifest upload failure without recreating releases', async () => {
     const github = new ApplyGitHub()
     github.manifestFailureRepository = 'findmydoc-platform/website'
-    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), { pollIntervalMs: 0, timeoutMs: 100 }))
+    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 }))
       .rejects.toThrow('manifest upload failed')
     expect(github.releases).toHaveLength(2)
+    expect(github.events.filter((event) => event.startsWith('publish:'))).toEqual([])
 
     github.manifestFailureRepository = undefined
-    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), { pollIntervalMs: 0, timeoutMs: 100 })
+    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
     expect(github.releases).toHaveLength(2)
+  })
+
+  it('resumes a partial publication with the same manifest', async () => {
+    const github = new ApplyGitHub()
+    github.publishFailureRepository = 'findmydoc-platform/website'
+    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 }))
+      .rejects.toThrow('release publication failed')
+    const firstManifest = github.manifests[0]
+    expect(github.releaseDetails.get('findmydoc-platform/clinic-dashboard')?.draft).toBe(false)
+    expect(github.releaseDetails.get('findmydoc-platform/website')?.draft).toBe(true)
+
+    github.publishFailureRepository = undefined
+    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
+    expect(github.lastManifestAttempt).toBe(firstManifest)
+    expect([...github.releaseDetails.values()].every((release) => release.draft === false)).toBe(true)
   })
 
   it('heals the live partial state with only the website manifest present', async () => {
     const github = new ApplyGitHub()
     github.manifestFailureRepository = 'findmydoc-platform/clinic-dashboard'
-    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), { pollIntervalMs: 0, timeoutMs: 100 }))
+    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 }))
       .rejects.toThrow('manifest upload failed')
     expect(github.lastManifestAttempt).toBeDefined()
 
     github.manifestByRepository.set('findmydoc-platform/website', github.lastManifestAttempt ?? '')
     github.manifestFailureRepository = undefined
-    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), { pollIntervalMs: 0, timeoutMs: 100 })
+    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
 
     expect(github.manifests).toHaveLength(1)
     expect(github.manifestByRepository.get('findmydoc-platform/clinic-dashboard')).toBe(github.lastManifestAttempt)
@@ -224,11 +267,11 @@ describe('platform release apply', () => {
 
   it('resumes after FounderOps failure with an identical manifest and no duplicate releases', async () => {
     const github = new ApplyGitHub()
-    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events, true), { pollIntervalMs: 0, timeoutMs: 100 }))
+    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events, true), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 }))
       .rejects.toThrow('FounderOps failed')
     const firstManifest = github.manifests[0]
     const replay = new FounderOps(github.events)
-    await applyPlatformRelease(applyInput(), github, replay, { pollIntervalMs: 0, timeoutMs: 100 })
+    await applyPlatformRelease(applyInput(), github, replay, announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
     expect(github.releases).toHaveLength(2)
     expect(github.manifests.every((manifest) => manifest === firstManifest)).toBe(true)
     expect(replay.calls).toBe(1)

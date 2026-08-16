@@ -1,4 +1,5 @@
 import type {
+  PlatformReleaseAnnouncementStore,
   PlatformReleaseGitHubClient,
   PlatformReleaseManifestV2,
 } from './types.js'
@@ -59,41 +60,34 @@ export async function announcePlatformReleaseOnce(
     webhook: string
   },
   github: PlatformReleaseGitHubClient,
+  announcementStore: PlatformReleaseAnnouncementStore,
   fetchImpl: typeof fetch = fetch,
 ): Promise<'already_sent' | 'sent'> {
-  const details = await Promise.all(input.manifest.components.map(async (component) => {
+  await Promise.all(input.manifest.components.map(async (component) => {
     const release = await github.getRelease(component.repository, input.manifest.version)
     if (!release) throw new Error(`${component.repository} ${input.manifest.version} must exist before announcement.`)
-    if (release.sha !== component.targetSha || release.url !== component.release) {
+    if (release.draft || !release.publishedAt || release.sha !== component.targetSha || release.url !== component.release) {
       throw new Error(`${component.repository} release does not match the approved platform manifest.`)
     }
-    return { release, repository: component.repository }
   }))
 
-  if (details.some(({ release }) => release.announcementState === 'sent')) {
-    await Promise.all(details
-      .filter(({ release }) => release.announcementState !== 'sent')
-      .map(({ repository }) => github.setReleaseAnnouncementState({
-        repository,
-        state: 'sent',
-        version: input.manifest.version,
-      })))
-    return 'already_sent'
-  }
-  if (details.some(({ release }) => release.announcementState === 'pending') && !input.forcePending) {
+  const state = await announcementStore.getState(input.manifest.manifestDigest)
+  if (state === 'sent') return 'already_sent'
+  if (state === 'pending' && !input.forcePending) {
     throw new Error('Release announcement is pending. Inspect Google Chat, then retry announce with --force if no message was sent.')
   }
 
-  await Promise.all(details.map(({ repository }) => github.setReleaseAnnouncementState({
-    repository,
+  await announcementStore.setState({
+    manifestDigest: input.manifest.manifestDigest,
     state: 'pending',
     version: input.manifest.version,
-  })))
+  })
   await announcePlatformRelease(input, fetchImpl)
-  await Promise.all(details.map(({ repository }) => github.setReleaseAnnouncementState({
-    repository,
+  await announcementStore.setState({
+    founderOpsUrl: input.founderOpsUrl,
+    manifestDigest: input.manifest.manifestDigest,
     state: 'sent',
     version: input.manifest.version,
-  })))
+  })
   return 'sent'
 }

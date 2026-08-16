@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   assertMatchingReleaseManifest,
   findWorkflowRunInPages,
+  GhPlatformReleaseAnnouncementStore,
   githubChildEnvironment,
   safeGhErrorDetail,
 } from '../../src/platform-release/github.js'
@@ -72,5 +73,40 @@ describe('GitHub release manifest resume', () => {
       status: 'completed',
       url: match.html_url,
     })
+  })
+
+  it('persists announcement state as one GitHub deployment per manifest digest', async () => {
+    const deployments: Array<{ id: number; payload: unknown }> = []
+    const statuses = new Map<number, Array<{ state: string }>>()
+    const request = async <T>(path: string, options: { body?: unknown; method?: string } = {}): Promise<T> => {
+      if (path.includes('/deployments?')) return deployments as T
+      const statusMatch = path.match(/\/deployments\/(\d+)\/statuses/)
+      if (statusMatch) {
+        const deploymentId = Number(statusMatch[1])
+        if (options.method === 'POST') {
+          const body = options.body as { state: string }
+          statuses.set(deploymentId, [{ state: body.state }, ...(statuses.get(deploymentId) ?? [])])
+          return {} as T
+        }
+        return (statuses.get(deploymentId) ?? []) as T
+      }
+      if (path.endsWith('/deployments') && options.method === 'POST') {
+        const body = options.body as { payload: unknown }
+        const deployment = { id: deployments.length + 1, payload: body.payload }
+        deployments.push(deployment)
+        return deployment as T
+      }
+      throw new Error(`Unexpected request: ${path}`)
+    }
+    const store = new GhPlatformReleaseAnnouncementStore('findmydoc-platform/platform-release', 'main', '', request)
+    const manifestDigest = 'a'.repeat(64)
+
+    await expect(store.getState(manifestDigest)).resolves.toBeUndefined()
+    await store.setState({ manifestDigest, state: 'pending', version: 'v0.46.1' })
+    await expect(store.getState(manifestDigest)).resolves.toBe('pending')
+    await store.setState({ founderOpsUrl: 'https://founder-ops.findmydoc.eu/releases/v0.46.1', manifestDigest,
+      state: 'sent', version: 'v0.46.1' })
+    await expect(store.getState(manifestDigest)).resolves.toBe('sent')
+    expect(deployments).toHaveLength(1)
   })
 })

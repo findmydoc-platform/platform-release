@@ -10,6 +10,7 @@ import type {
   PlatformReleaseApplyResult,
   PlatformReleaseConfig,
   PlatformReleaseContent,
+  PlatformReleaseAnnouncementStore,
   FounderOpsReleaseClient,
   PlatformReleaseGitHubClient,
   PlatformReleasePlan,
@@ -99,6 +100,7 @@ export async function applyPlatformRelease(
   },
   github: PlatformReleaseGitHubClient,
   founderOps: FounderOpsReleaseClient,
+  announcementStore: PlatformReleaseAnnouncementStore,
   options: { pollIntervalMs?: number; timeoutMs?: number } = {},
 ): Promise<PlatformReleaseApplyResult> {
   validatePlatformReleasePlan(input.plan)
@@ -131,7 +133,7 @@ export async function applyPlatformRelease(
     [key, await ensureDeployment(input.plan, key, github, workflowOptions)] as const))
   const workflows = Object.fromEntries(workflowEntries) as PlatformReleaseApplyResult['workflows']
 
-  const releaseEntries: Array<readonly [PlatformRepositoryKey, Awaited<ReturnType<PlatformReleaseGitHubClient['createRelease']>>]> = []
+  const releaseEntries: Array<readonly [PlatformRepositoryKey, Awaited<ReturnType<PlatformReleaseGitHubClient['createDraftRelease']>>]> = []
   for (const key of REPOSITORY_KEYS) {
     const repository = input.plan.repositories[key]
     const expectedBody = renderRepositoryReleaseNotes(input.plan, content, key)
@@ -142,7 +144,7 @@ export async function applyPlatformRelease(
     if (existing && existing.body.replace(ANNOUNCEMENT_MARKER, '').trim() !== expectedBody.trim()) {
       throw new Error(`${repository.repository} ${input.plan.version} release notes do not match the approved content.`)
     }
-    const release = existing ?? await github.createRelease({
+    const release = existing ?? await github.createDraftRelease({
       body: expectedBody,
       repository: repository.repository,
       targetSha: repository.targetSha,
@@ -150,8 +152,7 @@ export async function applyPlatformRelease(
     })
     releaseEntries.push([key, release])
   }
-  const releaseDetails = Object.fromEntries(releaseEntries) as Record<PlatformRepositoryKey, Awaited<ReturnType<PlatformReleaseGitHubClient['createRelease']>>>
-  const releases = Object.fromEntries(REPOSITORY_KEYS.map((key) => [key, { url: releaseDetails[key].url }])) as PlatformReleaseApplyResult['releases']
+  const releaseDetails = Object.fromEntries(releaseEntries) as Record<PlatformRepositoryKey, Awaited<ReturnType<PlatformReleaseGitHubClient['createDraftRelease']>>>
 
   const manifest = createPlatformReleaseManifest({
     config: input.config,
@@ -170,6 +171,20 @@ export async function applyPlatformRelease(
       version: input.plan.version,
     })
   }
+  for (const key of REPOSITORY_KEYS) {
+    const release = releaseDetails[key]
+    if (release.draft) {
+      releaseDetails[key] = await github.publishRelease({
+        releaseId: release.id,
+        repository: input.plan.repositories[key].repository,
+        version: input.plan.version,
+      })
+    }
+    if (releaseDetails[key].draft || !releaseDetails[key].publishedAt) {
+      throw new Error(`${input.plan.repositories[key].repository} ${input.plan.version} is not published.`)
+    }
+  }
+  const releases = Object.fromEntries(REPOSITORY_KEYS.map((key) => [key, { url: releaseDetails[key].url }])) as PlatformReleaseApplyResult['releases']
   const founderOpsResult = await founderOps.ingestManifest({
     manifest: serializedManifest,
     manifestDigest: manifest.manifestDigest,
@@ -181,7 +196,7 @@ export async function applyPlatformRelease(
       founderOpsUrl: founderOpsResult.url,
       manifest,
       webhook: input.webhook ?? '',
-    }, github)
+    }, github, announcementStore)
   }
 
   return {
