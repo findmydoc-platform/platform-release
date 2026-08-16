@@ -33,7 +33,7 @@ function announcementGitHub(initial?: ReleaseAnnouncementState): {
   const client = {
     async getRelease(repository: string) {
       const component = manifest().components.find((entry) => entry.repository === repository)!
-      return { body: '', draft: false, id: 1, immutable: true, preparedAt: '2026-08-12T11:59:00Z',
+      return { body: '', draft: false, id: 1, immutable: true, manifestAttached: true, preparedAt: '2026-08-12T11:59:00Z',
         publishedAt: '2026-08-12T12:00:00Z', sha: component.targetSha, url: component.release }
     },
   } as unknown as PlatformReleaseGitHubClient

@@ -106,6 +106,7 @@ export type PlatformReleaseDetails = {
   draft: boolean
   id: number
   immutable: boolean
+  manifestAttached: boolean
   preparedAt: string
   publishedAt?: string
   sha: string

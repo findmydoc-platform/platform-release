@@ -81,6 +81,7 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
     draft: boolean
     id: number
     immutable: boolean
+    manifestAttached: boolean
     preparedAt: string
     publishedAt?: string
     sha: string
@@ -107,7 +108,7 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
     if (this.createFailureRepository === input.repository) throw new Error('release creation failed')
     this.events.push(`draft:${input.repository}`)
     this.releases.push(input.repository)
-    const details = { body: input.body, draft: true, id: this.releases.length, immutable: false,
+    const details = { body: input.body, draft: true, id: this.releases.length, immutable: false, manifestAttached: false,
       preparedAt: '2026-08-12T11:59:00Z', sha: input.targetSha,
       url: `https://github.com/${input.repository}/releases/tag/${input.version}` }
     this.releaseDetails.set(input.repository, details)
@@ -117,7 +118,8 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
     if (this.publishFailureRepository === input.repository) throw new Error('release publication failed')
     const details = this.releaseDetails.get(input.repository)
     if (!details) throw new Error('release does not exist')
-    const published = { ...details, draft: false, immutable: true, publishedAt: '2026-08-12T12:00:00Z' }
+    const published = { ...details, draft: false, immutable: true,
+      manifestAttached: this.manifestByRepository.has(input.repository), publishedAt: '2026-08-12T12:00:00Z' }
     this.releaseDetails.set(input.repository, published)
     this.events.push(`publish:${input.repository}`)
     return published
@@ -247,6 +249,17 @@ describe('platform release apply', () => {
     await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
     expect(github.lastManifestAttempt).toBe(firstManifest)
     expect([...github.releaseDetails.values()].every((release) => release.draft === false)).toBe(true)
+  })
+
+  it('fails closed when a published immutable release is missing its manifest', async () => {
+    const github = new ApplyGitHub()
+    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
+    const dashboard = github.releaseDetails.get('findmydoc-platform/clinic-dashboard')!
+    github.releaseDetails.set('findmydoc-platform/clinic-dashboard', { ...dashboard, immutable: true, manifestAttached: false })
+    github.manifestByRepository.delete('findmydoc-platform/clinic-dashboard')
+
+    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 }))
+      .rejects.toThrow('immutable and missing platform-release.json')
   })
 
   it('heals the live partial state with only the website manifest present', async () => {

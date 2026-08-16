@@ -66,7 +66,8 @@ export async function announcePlatformReleaseOnce(
   await Promise.all(input.manifest.components.map(async (component) => {
     const release = await github.getRelease(component.repository, input.manifest.version)
     if (!release) throw new Error(`${component.repository} ${input.manifest.version} must exist before announcement.`)
-    if (release.draft || !release.publishedAt || release.sha !== component.targetSha || release.url !== component.release) {
+    if (release.draft || !release.publishedAt || !release.manifestAttached ||
+      release.sha !== component.targetSha || release.url !== component.release) {
       throw new Error(`${component.repository} release does not match the approved platform manifest.`)
     }
   }))

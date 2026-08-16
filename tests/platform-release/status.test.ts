@@ -37,4 +37,20 @@ describe('platform release status', () => {
       'findmydoc-platform/website v0.45.1 does not point to website-target.',
     ])
   })
+
+  it('reports an immutable published release that is missing its manifest', async () => {
+    const github = {
+      async findWorkflowRun() { return undefined },
+      async getRelease(repository: string) {
+        return { body: '', draft: false, id: 1, immutable: repository.endsWith('/clinic-dashboard'),
+          manifestAttached: !repository.endsWith('/clinic-dashboard'), preparedAt: '2026-08-16T12:00:00Z',
+          publishedAt: '2026-08-16T12:01:00Z', sha: repository.endsWith('/website') ? 'website-target' : 'dashboard-target',
+          url: 'https://example.test' }
+      },
+    } as unknown as PlatformReleaseGitHubClient
+    const result = await getPlatformReleaseStatus(plan(), github) as { problems: string[] }
+    expect(result.problems).toContain(
+      'findmydoc-platform/clinic-dashboard v0.45.1 is missing platform-release.json.',
+    )
+  })
 })

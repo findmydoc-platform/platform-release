@@ -141,6 +141,11 @@ export async function applyPlatformRelease(
     if (existing && existing.sha !== repository.targetSha) {
       throw new Error(`${repository.repository} ${input.plan.version} points to ${existing.sha}, not ${repository.targetSha}.`)
     }
+    if (existing && !existing.draft && existing.immutable && !existing.manifestAttached) {
+      throw new Error(
+        `${repository.repository} ${input.plan.version} is immutable and missing platform-release.json; publish a new platform version after fixing the runner.`,
+      )
+    }
     if (existing && existing.body.replace(ANNOUNCEMENT_MARKER, '').trim() !== expectedBody.trim()) {
       throw new Error(`${repository.repository} ${input.plan.version} release notes do not match the approved content.`)
     }
@@ -180,8 +185,8 @@ export async function applyPlatformRelease(
         version: input.plan.version,
       })
     }
-    if (releaseDetails[key].draft || !releaseDetails[key].publishedAt) {
-      throw new Error(`${input.plan.repositories[key].repository} ${input.plan.version} is not published.`)
+    if (releaseDetails[key].draft || !releaseDetails[key].publishedAt || !releaseDetails[key].manifestAttached) {
+      throw new Error(`${input.plan.repositories[key].repository} ${input.plan.version} is not published with its manifest.`)
     }
   }
   const releases = Object.fromEntries(REPOSITORY_KEYS.map((key) => [key, { url: releaseDetails[key].url }])) as PlatformReleaseApplyResult['releases']

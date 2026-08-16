@@ -194,6 +194,7 @@ async function platformReleaseDetails(
     draft,
     id: release.id,
     immutable: release.immutable === true,
+    manifestAttached: release.assets?.some((asset) => asset.name === 'platform-release.json') === true,
     preparedAt: release.created_at,
     publishedAt: release.published_at ?? undefined,
     sha,
@@ -429,6 +430,11 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
       ])
       assertMatchingReleaseManifest(existing, input.manifest, input.repository, input.version)
       return
+    }
+    if (release.immutable === true) {
+      throw new Error(
+        `${input.repository} ${input.version} is immutable and missing platform-release.json; publish a new platform version after fixing the runner.`,
+      )
     }
     const directory = await mkdtemp(join(tmpdir(), 'fmd-platform-release-'))
     const path = join(directory, 'platform-release.json')
