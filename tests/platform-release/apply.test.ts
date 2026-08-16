@@ -105,6 +105,7 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
   }
   async dispatchWorkflow(input: { repository: string }) { this.dispatches.push(input.repository) }
   async getRelease(repository: string) { return this.releaseDetails.get(repository) }
+  async getReleaseManifest(repository: string) { return this.manifestByRepository.get(repository) }
   async createDraftRelease(input: { body: string; repository: string; targetSha: string; version: string }) {
     if (this.createFailureRepository === input.repository) throw new Error('release creation failed')
     this.events.push(`draft:${input.repository}`)

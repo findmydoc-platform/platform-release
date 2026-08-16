@@ -21,7 +21,7 @@ import type {
 const REPOSITORY_KEYS: PlatformRepositoryKey[] = ['dashboard', 'website']
 const RELEASE_METADATA_MARKER = /\n*<!--\s*findmydoc-platform-(?:announcement:(?:pending|sent)|published-at:[^\s>]+)\s*-->\s*$/
 
-function releaseNotesBody(body: string): string {
+export function releaseNotesBody(body: string): string {
   let value = body
   while (RELEASE_METADATA_MARKER.test(value)) value = value.replace(RELEASE_METADATA_MARKER, '')
   return value.trim()

@@ -58,6 +58,7 @@ class PlanningGitHub implements PlatformReleaseGitHubClient {
   async dispatchWorkflow() { throw new Error('not used') }
   async findWorkflowRun() { return undefined }
   async getRelease() { return undefined }
+  async getReleaseManifest() { return undefined }
   async ensureReleaseManifest() { throw new Error('not used') }
   async publishRelease() { throw new Error('not used') }
   async setReleasePlatformPublishedAt() { throw new Error('not used') }
