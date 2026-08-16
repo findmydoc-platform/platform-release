@@ -211,6 +211,7 @@ export type PlatformReleaseGitHubClient = {
   getLatestRelease(repository: string): Promise<{ sha: string; version: string } | undefined>
   getPullRequests(repository: string, commits: ReleaseCommit[]): Promise<ReleasePullRequest[]>
   getRelease(repository: string, version: string): Promise<PlatformReleaseDetails | undefined>
+  getReleaseManifest(repository: string, version: string): Promise<string | undefined>
   isAncestor(repository: string, ancestor: string, branch: string): Promise<boolean>
   publishRelease(input: { repository: string; releaseId: number; version: string }): Promise<PlatformReleaseDetails>
   setReleasePlatformPublishedAt(input: {

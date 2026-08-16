@@ -55,11 +55,15 @@ export async function announcePlatformRelease(
 export async function assertPublishedPlatformRelease(
   manifest: PlatformReleaseManifestV2,
   github: PlatformReleaseGitHubClient,
+  options: { allowedMissingManifestRepository?: string } = {},
 ): Promise<void> {
   await Promise.all(manifest.components.map(async (component) => {
     const release = await github.getRelease(component.repository, manifest.version)
     if (!release) throw new Error(`${component.repository} ${manifest.version} must exist before announcement.`)
-    if (release.draft || !release.publishedAt || !release.manifestAttached ||
+    const manifestRequirementSatisfied = release.manifestAttached || (
+      component.repository === options.allowedMissingManifestRepository && release.immutable
+    )
+    if (release.draft || !release.publishedAt || !manifestRequirementSatisfied ||
       release.sha !== component.targetSha || release.url !== component.release) {
       throw new Error(`${component.repository} release does not match the approved platform manifest.`)
     }
@@ -71,13 +75,16 @@ export async function announcePlatformReleaseOnce(
     forcePending?: boolean
     founderOpsUrl: string
     manifest: PlatformReleaseManifestV2
+    allowedMissingManifestRepository?: string
     webhook: string
   },
   github: PlatformReleaseGitHubClient,
   announcementStore: PlatformReleaseAnnouncementStore,
   fetchImpl: typeof fetch = fetch,
 ): Promise<'already_sent' | 'sent'> {
-  await assertPublishedPlatformRelease(input.manifest, github)
+  await assertPublishedPlatformRelease(input.manifest, github, {
+    allowedMissingManifestRepository: input.allowedMissingManifestRepository,
+  })
 
   const state = await announcementStore.getState(input.manifest.manifestDigest)
   if (state === 'sent') return 'already_sent'

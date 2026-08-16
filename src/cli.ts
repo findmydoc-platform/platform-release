@@ -20,6 +20,10 @@ import {
   readPlatformReleasePlan,
   writePlatformReleasePlan,
 } from './platform-release/plan.js'
+import {
+  inspectImmutableManifestGapRecovery,
+  recoverImmutableManifestGap,
+} from './platform-release/recover.js'
 import { getPlatformReleaseStatus } from './platform-release/status.js'
 import type { PlatformReleaseAnnouncementStore, PlatformReleaseGitHubClient } from './platform-release/types.js'
 
@@ -39,6 +43,23 @@ type ApplyOptions = {
 }
 type StatusOptions = { json?: boolean; plan: string }
 type AnnounceOptions = { configPath: string; confirmManifestDigest: string; force?: boolean; json?: boolean; manifest: string; send: boolean }
+type RecoverOptions = {
+  announce?: boolean
+  apply?: boolean
+  configPath: string
+  confirmContentDigest: string
+  confirmDigest: string
+  confirmManifestDigest: string
+  confirmMissingManifestRepository: string
+  confirmMissingPlatformPublishedAt: boolean
+  confirmMutableManifestRepository: string
+  confirmVersion: string
+  content: string
+  force?: boolean
+  json?: boolean
+  manifest: string
+  plan: string
+}
 type CliRuntime = {
   createAnnouncementStore: () => PlatformReleaseAnnouncementStore
   createGitHubClient: () => PlatformReleaseGitHubClient
@@ -246,6 +267,64 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
           webhook,
         }, github, runtime.createAnnouncementStore())
         writeJson({ founderOps: ingested, status, version: manifestFile.manifest.version }, runtime.writeStdout)
+      } catch (error) {
+        writeError(error, options.json, runtime)
+      }
+    })
+
+  program
+    .command('recover')
+    .description('Recover FounderOps ingestion and announcement from one verified immutable manifest-asset gap')
+    .requiredOption('--plan <path>', 'original immutable JSON plan')
+    .requiredOption('--content <path>', 'original approved structured release content JSON')
+    .requiredOption('--manifest <path>', 'canonical platform-release.json from the complete release')
+    .requiredOption('--confirm-version <version>', 'must exactly match the original release version')
+    .requiredOption('--confirm-digest <digest>', 'must exactly match the original frozen plan digest')
+    .requiredOption('--confirm-content-digest <digest>', 'must exactly match the original approved content digest')
+    .requiredOption('--confirm-manifest-digest <digest>', 'must exactly match the canonical manifest digest')
+    .requiredOption('--confirm-missing-manifest-repository <repository>', 'must name the single immutable release missing the manifest asset')
+    .requiredOption('--confirm-mutable-manifest-repository <repository>', 'must name the other manifest-bearing release that remains mutable')
+    .requiredOption('--confirm-missing-platform-published-at', 'explicitly accept that both legacy releases lack stable publication metadata')
+    .option('--config-path <path>', 'trusted platform release configuration path', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
+    .option('--apply', 'perform FounderOps ingestion and optional announcement after the read-only checks')
+    .option('--announce', 'send the compact Google Chat announcement after FounderOps ingestion')
+    .option('--force', 'continue an ambiguous pending announcement after checking Google Chat')
+    .option('--json', 'emit JSON output')
+    .action(async (options: RecoverOptions) => {
+      try {
+        const [config, plan, manifestFile] = await Promise.all([
+          loadPlatformReleaseConfig(options.configPath),
+          readPlatformReleasePlan(options.plan),
+          readPlatformReleaseManifest(options.manifest),
+        ])
+        const content = await readReleaseContent(options.content, plan)
+        const input = {
+          announce: options.announce === true,
+          config,
+          confirmContentDigest: options.confirmContentDigest,
+          confirmDigest: options.confirmDigest,
+          confirmManifestDigest: options.confirmManifestDigest,
+          confirmMissingManifestRepository: options.confirmMissingManifestRepository,
+          confirmMissingPlatformPublishedAt: options.confirmMissingPlatformPublishedAt,
+          confirmMutableManifestRepository: options.confirmMutableManifestRepository,
+          confirmVersion: options.confirmVersion,
+          content,
+          forceAnnouncement: options.force === true,
+          manifest: manifestFile.manifest,
+          plan,
+          serializedManifest: manifestFile.serialized,
+          webhook: process.env.GOOGLE_CHAT_WEBHOOK_URL,
+        }
+        const github = runtime.createGitHubClient()
+        const result = options.apply
+          ? await recoverImmutableManifestGap(
+            input,
+            github,
+            founderOpsClient(config),
+            runtime.createAnnouncementStore(),
+          )
+          : await inspectImmutableManifestGapRecovery(input, github)
+        writeJson(result, runtime.writeStdout)
       } catch (error) {
         writeError(error, options.json, runtime)
       }

@@ -454,21 +454,28 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     return details
   }
 
-  async ensureReleaseManifest(input: { manifest: string; repository: string; version: string }): Promise<void> {
-    const release = await findReleaseIncludingDraft(input.repository, input.version)
-    if (!release) throw new Error(`${input.repository} ${input.version} release does not exist.`)
+  async getReleaseManifest(repository: string, version: string): Promise<string | undefined> {
+    const release = await findReleaseIncludingDraft(repository, version)
+    if (!release) throw new Error(`${repository} ${version} release does not exist.`)
     const asset = release.assets?.find((candidate) => candidate.name === 'platform-release.json')
-    if (asset) {
-      if (!asset.id) throw new Error(`${input.repository} platform-release.json has no asset ID.`)
-      const existing = await runGh([
-        'api',
-        '--header',
-        'Accept: application/octet-stream',
-        `repos/${input.repository}/releases/assets/${asset.id}`,
-      ])
+    if (!asset) return undefined
+    if (!asset.id) throw new Error(`${repository} platform-release.json has no asset ID.`)
+    return runGh([
+      'api',
+      '--header',
+      'Accept: application/octet-stream',
+      `repos/${repository}/releases/assets/${asset.id}`,
+    ])
+  }
+
+  async ensureReleaseManifest(input: { manifest: string; repository: string; version: string }): Promise<void> {
+    const existing = await this.getReleaseManifest(input.repository, input.version)
+    if (existing !== undefined) {
       assertMatchingReleaseManifest(existing, input.manifest, input.repository, input.version)
       return
     }
+    const release = await findReleaseIncludingDraft(input.repository, input.version)
+    if (!release) throw new Error(`${input.repository} ${input.version} release does not exist.`)
     if (release.immutable === true) {
       throw new Error(
         `${input.repository} ${input.version} is immutable and missing platform-release.json; publish a new platform version after fixing the runner.`,
