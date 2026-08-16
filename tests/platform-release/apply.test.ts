@@ -79,6 +79,10 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
   createFailureRepository?: string
   failureRepository?: string
   manifestFailureRepository?: string
+  manifestCallsInFlight = 0
+  manifestByRepository = new Map<string, string>()
+  lastManifestAttempt?: string
+  maxManifestCallsInFlight = 0
 
   async isAncestor() { return true }
   async findWorkflowRun(input: { repository: string }): Promise<WorkflowRun | undefined> {
@@ -98,9 +102,23 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
     return details
   }
   async ensureReleaseManifest(input: { manifest: string; repository: string }) {
-    if (this.manifestFailureRepository === input.repository) throw new Error('manifest upload failed')
-    this.events.push(`manifest:${input.repository}`)
-    this.manifests.push(input.manifest)
+    this.manifestCallsInFlight += 1
+    this.maxManifestCallsInFlight = Math.max(this.maxManifestCallsInFlight, this.manifestCallsInFlight)
+    this.lastManifestAttempt = input.manifest
+    try {
+      await Promise.resolve()
+      const existing = this.manifestByRepository.get(input.repository)
+      if (existing !== undefined) {
+        if (existing !== input.manifest) throw new Error('existing manifest differs')
+        return
+      }
+      if (this.manifestFailureRepository === input.repository) throw new Error('manifest upload failed')
+      this.events.push(`manifest:${input.repository}`)
+      this.manifests.push(input.manifest)
+      this.manifestByRepository.set(input.repository, input.manifest)
+    } finally {
+      this.manifestCallsInFlight -= 1
+    }
   }
   async setReleaseAnnouncementState() {}
   async compareCommits() { throw new Error('not used') }
@@ -141,6 +159,7 @@ describe('platform release apply', () => {
     expect(github.dispatches).toEqual(['findmydoc-platform/clinic-dashboard', 'findmydoc-platform/website'])
     expect(github.manifests).toHaveLength(2)
     expect(github.manifests[0]).toBe(github.manifests[1])
+    expect(github.maxManifestCallsInFlight).toBe(1)
     expect(github.events.indexOf('founderops')).toBeGreaterThan(github.events.lastIndexOf('manifest:findmydoc-platform/website'))
     expect(result).toMatchObject({ contentDigest: applyInput().confirmContentDigest, status: 'published' })
   })
@@ -184,6 +203,22 @@ describe('platform release apply', () => {
 
     github.manifestFailureRepository = undefined
     await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), { pollIntervalMs: 0, timeoutMs: 100 })
+    expect(github.releases).toHaveLength(2)
+  })
+
+  it('heals the live partial state with only the website manifest present', async () => {
+    const github = new ApplyGitHub()
+    github.manifestFailureRepository = 'findmydoc-platform/clinic-dashboard'
+    await expect(applyPlatformRelease(applyInput(), github, new FounderOps(github.events), { pollIntervalMs: 0, timeoutMs: 100 }))
+      .rejects.toThrow('manifest upload failed')
+    expect(github.lastManifestAttempt).toBeDefined()
+
+    github.manifestByRepository.set('findmydoc-platform/website', github.lastManifestAttempt ?? '')
+    github.manifestFailureRepository = undefined
+    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), { pollIntervalMs: 0, timeoutMs: 100 })
+
+    expect(github.manifests).toHaveLength(1)
+    expect(github.manifestByRepository.get('findmydoc-platform/clinic-dashboard')).toBe(github.lastManifestAttempt)
     expect(github.releases).toHaveLength(2)
   })
 

@@ -3,6 +3,7 @@ import {
   assertMatchingReleaseManifest,
   findWorkflowRunInPages,
   githubChildEnvironment,
+  safeGhErrorDetail,
 } from '../../src/platform-release/github.js'
 
 function workflowRun(id: number, title: string) {
@@ -39,6 +40,16 @@ describe('GitHub release manifest resume', () => {
       SystemRoot: 'windows-root',
       USERPROFILE: 'windows-home',
     })
+  })
+
+  it('redacts credentials from GitHub CLI diagnostics', () => {
+    const detail = safeGhErrorDetail(new Error(
+      'upload failed for ghs_exampleSecret Authorization: Bearer another-secret',
+    ))
+    expect(detail).toContain('upload failed for [redacted]')
+    expect(detail).toContain('Authorization: Bearer [redacted]')
+    expect(detail).not.toContain('exampleSecret')
+    expect(detail).not.toContain('another-secret')
   })
 
   it('finds an existing deployment run beyond the first workflow-runs page', async () => {
