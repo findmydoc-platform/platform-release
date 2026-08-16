@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { bumpForMessage, compareVersions, parseVersion } from './semver.js'
 import { extractReleaseVisuals } from './visuals.js'
 import type {
+  PlatformReleaseAnnouncementStore,
   PlatformReleaseGitHubClient,
   PlatformReleaseDetails,
   ReleaseAnnouncementState,
@@ -17,12 +18,15 @@ import type {
 type GitHubRelease = {
   assets?: Array<{ id?: number; name?: string }>
   body?: string | null
+  created_at?: string
   html_url?: string
   id?: number
+  immutable?: boolean
   published_at?: string | null
   prerelease?: boolean
   draft?: boolean
   tag_name?: string
+  target_commitish?: string
 }
 
 type GitHubWorkflowRun = {
@@ -37,12 +41,26 @@ type GitHubWorkflowRunsPage = {
   workflow_runs: GitHubWorkflowRun[]
 }
 
-const ANNOUNCEMENT_MARKER = /<!--\s*findmydoc-platform-announcement:(pending|sent)\s*-->/
-const WORKFLOW_RUNS_PAGE_SIZE = 100
+type GitHubDeployment = {
+  id: number
+  payload?: unknown
+}
 
-function announcementState(body: string | null | undefined): ReleaseAnnouncementState | undefined {
-  const value = body?.match(ANNOUNCEMENT_MARKER)?.[1]
-  return value === 'pending' || value === 'sent' ? value : undefined
+type GitHubDeploymentStatus = {
+  state?: string
+}
+
+type GitHubApiOptions = { method?: string; body?: unknown }
+type GitHubApiRequest = <T>(path: string, options?: GitHubApiOptions) => Promise<T>
+
+const WORKFLOW_RUNS_PAGE_SIZE = 100
+const PLATFORM_PUBLISHED_AT_MARKER = /<!--\s*findmydoc-platform-published-at:([^\s>]+)\s*-->/
+
+function platformPublishedAt(body: string | null | undefined): string | undefined {
+  const value = body?.match(PLATFORM_PUBLISHED_AT_MARKER)?.[1]
+  if (!value) return undefined
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.valueOf()) || parsed.toISOString() !== value ? undefined : value
 }
 
 export async function findWorkflowRunInPages(
@@ -105,10 +123,10 @@ export function githubChildEnvironment(environment: NodeJS.ProcessEnv = process.
   return Object.fromEntries(allowlist.flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]]]))
 }
 
-async function runGh(args: string[], input?: string): Promise<string> {
+async function runGh(args: string[], input?: string, environment: NodeJS.ProcessEnv = process.env): Promise<string> {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn('gh', args, {
-      env: githubChildEnvironment(),
+      env: githubChildEnvironment(environment),
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -127,11 +145,15 @@ async function runGh(args: string[], input?: string): Promise<string> {
   })
 }
 
-async function api<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+async function api<T>(
+  path: string,
+  options: { method?: string; body?: unknown } = {},
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<T> {
   const args = ['api', path]
   if (options.method) args.push('--method', options.method)
   if (options.body !== undefined) args.push('--input', '-')
-  const output = await runGh(args, options.body === undefined ? undefined : JSON.stringify(options.body))
+  const output = await runGh(args, options.body === undefined ? undefined : JSON.stringify(options.body), environment)
   return output.trim() ? JSON.parse(output) as T : undefined as T
 }
 
@@ -149,6 +171,44 @@ async function resolveTagSha(repository: string, tag: string): Promise<string> {
   if (ref.object.type !== 'tag') return ref.object.sha
   const annotated = await api<{ object: { sha: string } }>(`repos/${repository}/git/tags/${ref.object.sha}`)
   return annotated.object.sha
+}
+
+function releaseUrl(repository: string, version: string): string {
+  return `https://github.com/${repository}/releases/tag/${encodeURIComponent(version)}`
+}
+
+async function findReleaseIncludingDraft(repository: string, version: string): Promise<GitHubRelease | undefined> {
+  for (let page = 1; ; page += 1) {
+    const releases = await api<GitHubRelease[]>(`repos/${repository}/releases?per_page=100&page=${page}`)
+    const release = releases.find((candidate) => candidate.tag_name === version)
+    if (release) return release
+    if (releases.length < 100) return undefined
+  }
+}
+
+async function platformReleaseDetails(
+  repository: string,
+  version: string,
+  release: GitHubRelease,
+): Promise<PlatformReleaseDetails> {
+  if (!release.id || !release.created_at) {
+    throw new Error(`GitHub did not return complete release metadata for ${repository} ${version}.`)
+  }
+  const draft = release.draft === true
+  const sha = draft ? release.target_commitish : await resolveTagSha(repository, version)
+  if (!sha) throw new Error(`GitHub draft ${repository} ${version} has no target commit.`)
+  return {
+    body: release.body ?? '',
+    draft,
+    id: release.id,
+    immutable: release.immutable === true,
+    manifestAttached: release.assets?.some((asset) => asset.name === 'platform-release.json') === true,
+    platformPublishedAt: platformPublishedAt(release.body),
+    preparedAt: release.created_at,
+    publishedAt: release.published_at ?? undefined,
+    sha,
+    url: releaseUrl(repository, version),
+  }
 }
 
 async function closingIssues(repository: string, number: number): Promise<ReleaseIssue[]> {
@@ -315,39 +375,11 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   }
 
   async getRelease(repository: string, version: string): Promise<PlatformReleaseDetails | undefined> {
-    const release = await optionalApi<GitHubRelease>(`repos/${repository}/releases/tags/${encodeURIComponent(version)}`)
-    if (!release?.html_url || !release.id || !release.published_at) return undefined
-    return {
-      announcementState: announcementState(release.body),
-      body: release.body ?? '',
-      id: release.id,
-      publishedAt: release.published_at,
-      sha: await resolveTagSha(repository, version),
-      url: release.html_url,
-    }
+    const release = await findReleaseIncludingDraft(repository, version)
+    return release ? platformReleaseDetails(repository, version, release) : undefined
   }
 
-  async setReleaseAnnouncementState(input: {
-    repository: string
-    state: ReleaseAnnouncementState
-    version: string
-  }): Promise<void> {
-    const release = await api<GitHubRelease>(
-      `repos/${input.repository}/releases/tags/${encodeURIComponent(input.version)}`,
-    )
-    if (!release.id) throw new Error(`GitHub release ${input.repository} ${input.version} has no ID.`)
-    const marker = `<!-- findmydoc-platform-announcement:${input.state} -->`
-    const currentBody = release.body ?? ''
-    const body = ANNOUNCEMENT_MARKER.test(currentBody)
-      ? currentBody.replace(ANNOUNCEMENT_MARKER, marker)
-      : `${currentBody.trim()}\n\n${marker}\n`
-    await api(`repos/${input.repository}/releases/${release.id}`, {
-      body: { body },
-      method: 'PATCH',
-    })
-  }
-
-  async createRelease(input: {
+  async createDraftRelease(input: {
     body: string
     repository: string
     targetSha: string
@@ -365,7 +397,7 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     const release = await api<GitHubRelease>(`repos/${input.repository}/releases`, {
       body: {
         body: input.body,
-        draft: false,
+        draft: true,
         generate_release_notes: false,
         name: `findmydoc ${input.version}`,
         prerelease: false,
@@ -374,20 +406,57 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
       },
       method: 'POST',
     })
-    if (!release.id || !release.html_url || !release.published_at) {
-      throw new Error(`GitHub did not return the created release for ${input.repository}.`)
+    return platformReleaseDetails(input.repository, input.version, release)
+  }
+
+  async publishRelease(input: {
+    releaseId: number
+    repository: string
+    version: string
+  }): Promise<PlatformReleaseDetails> {
+    const release = await api<GitHubRelease>(`repos/${input.repository}/releases/${input.releaseId}`, {
+      body: { draft: false },
+      method: 'PATCH',
+    })
+    const details = await platformReleaseDetails(input.repository, input.version, release)
+    if (details.draft || !details.publishedAt) {
+      throw new Error(`GitHub did not publish ${input.repository} ${input.version}.`)
     }
-    return {
-      body: input.body,
-      id: release.id,
-      publishedAt: release.published_at,
-      sha: await resolveTagSha(input.repository, input.version),
-      url: release.html_url,
+    return details
+  }
+
+  async setReleasePlatformPublishedAt(input: {
+    platformPublishedAt: string
+    releaseId: number
+    repository: string
+    version: string
+  }): Promise<PlatformReleaseDetails> {
+    const current = await api<GitHubRelease>(`repos/${input.repository}/releases/${input.releaseId}`)
+    if (current.draft !== true) {
+      throw new Error(`${input.repository} ${input.version} is already published without stable platform publication metadata.`)
     }
+    const existing = platformPublishedAt(current.body)
+    if (existing && existing !== input.platformPublishedAt) {
+      throw new Error(`${input.repository} ${input.version} has conflicting platform publication metadata.`)
+    }
+    if (existing === input.platformPublishedAt) {
+      return platformReleaseDetails(input.repository, input.version, current)
+    }
+    const body = `${(current.body ?? '').trim()}\n\n<!-- findmydoc-platform-published-at:${input.platformPublishedAt} -->\n`
+    const release = await api<GitHubRelease>(`repos/${input.repository}/releases/${input.releaseId}`, {
+      body: { body },
+      method: 'PATCH',
+    })
+    const details = await platformReleaseDetails(input.repository, input.version, release)
+    if (details.platformPublishedAt !== input.platformPublishedAt) {
+      throw new Error(`GitHub did not preserve platform publication metadata for ${input.repository} ${input.version}.`)
+    }
+    return details
   }
 
   async ensureReleaseManifest(input: { manifest: string; repository: string; version: string }): Promise<void> {
-    const release = await api<GitHubRelease>(`repos/${input.repository}/releases/tags/${encodeURIComponent(input.version)}`)
+    const release = await findReleaseIncludingDraft(input.repository, input.version)
+    if (!release) throw new Error(`${input.repository} ${input.version} release does not exist.`)
     const asset = release.assets?.find((candidate) => candidate.name === 'platform-release.json')
     if (asset) {
       if (!asset.id) throw new Error(`${input.repository} platform-release.json has no asset ID.`)
@@ -399,6 +468,11 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
       ])
       assertMatchingReleaseManifest(existing, input.manifest, input.repository, input.version)
       return
+    }
+    if (release.immutable === true) {
+      throw new Error(
+        `${input.repository} ${input.version} is immutable and missing platform-release.json; publish a new platform version after fixing the runner.`,
+      )
     }
     const directory = await mkdtemp(join(tmpdir(), 'fmd-platform-release-'))
     const path = join(directory, 'platform-release.json')
@@ -417,6 +491,101 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     }
   }
 
+}
+
+const ANNOUNCEMENT_ENVIRONMENT = 'platform-release-announcement'
+
+function deploymentManifestDigest(payload: unknown): string | undefined {
+  let candidate = payload
+  if (typeof candidate === 'string') {
+    try {
+      candidate = JSON.parse(candidate) as unknown
+    } catch {
+      return undefined
+    }
+  }
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return undefined
+  const digest = (candidate as { manifestDigest?: unknown }).manifestDigest
+  return typeof digest === 'string' ? digest : undefined
+}
+
+export class GhPlatformReleaseAnnouncementStore implements PlatformReleaseAnnouncementStore {
+  constructor(
+    private readonly repository = 'findmydoc-platform/platform-release',
+    private readonly ref = 'main',
+    private readonly token = '',
+    private readonly requestOverride?: GitHubApiRequest,
+  ) {}
+
+  private environment(): NodeJS.ProcessEnv {
+    return this.token ? { ...process.env, GH_TOKEN: this.token } : process.env
+  }
+
+  private request<T>(path: string, options: GitHubApiOptions = {}): Promise<T> {
+    return this.requestOverride
+      ? this.requestOverride<T>(path, options)
+      : api<T>(path, options, this.environment())
+  }
+
+  private async findDeployment(manifestDigest: string): Promise<GitHubDeployment | undefined> {
+    for (let page = 1; ; page += 1) {
+      const deployments = await this.request<GitHubDeployment[]>(
+        `repos/${this.repository}/deployments?environment=${encodeURIComponent(ANNOUNCEMENT_ENVIRONMENT)}&per_page=100&page=${page}`,
+      )
+      const match = deployments.find((deployment) => deploymentManifestDigest(deployment.payload) === manifestDigest)
+      if (match) return match
+      if (deployments.length < 100) return undefined
+    }
+  }
+
+  private async latestState(deploymentId: number): Promise<string | undefined> {
+    const statuses = await this.request<GitHubDeploymentStatus[]>(
+      `repos/${this.repository}/deployments/${deploymentId}/statuses?per_page=1`,
+    )
+    return statuses[0]?.state
+  }
+
+  async getState(manifestDigest: string): Promise<ReleaseAnnouncementState | undefined> {
+    const deployment = await this.findDeployment(manifestDigest)
+    if (!deployment) return undefined
+    return await this.latestState(deployment.id) === 'success' ? 'sent' : 'pending'
+  }
+
+  async setState(input: {
+    founderOpsUrl?: string
+    manifestDigest: string
+    state: ReleaseAnnouncementState
+    version: string
+  }): Promise<void> {
+    let deployment = await this.findDeployment(input.manifestDigest)
+    if (!deployment) {
+      deployment = await this.request<GitHubDeployment>(`repos/${this.repository}/deployments`, {
+        body: {
+          auto_merge: false,
+          description: `Google Chat announcement for findmydoc ${input.version}`,
+          environment: ANNOUNCEMENT_ENVIRONMENT,
+          payload: { manifestDigest: input.manifestDigest, schemaVersion: 1, version: input.version },
+          production_environment: false,
+          ref: this.ref,
+          required_contexts: [],
+          transient_environment: false,
+        },
+        method: 'POST',
+      })
+    }
+    const expectedState = input.state === 'sent' ? 'success' : 'in_progress'
+    if (await this.latestState(deployment.id) === expectedState) return
+    await this.request(`repos/${this.repository}/deployments/${deployment.id}/statuses`, {
+      body: {
+        auto_inactive: false,
+        description: input.state === 'sent' ? 'Google Chat announcement sent.' : 'Google Chat announcement pending.',
+        environment: ANNOUNCEMENT_ENVIRONMENT,
+        ...(input.state === 'sent' && input.founderOpsUrl ? { environment_url: input.founderOpsUrl } : {}),
+        state: expectedState,
+      },
+      method: 'POST',
+    })
+  }
 }
 
 export function assertMatchingReleaseManifest(

@@ -3,7 +3,7 @@ import { Command } from 'commander'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { announcePlatformReleaseOnce } from './platform-release/announce.js'
+import { announcePlatformReleaseOnce, assertPublishedPlatformRelease } from './platform-release/announce.js'
 import { applyPlatformRelease } from './platform-release/apply.js'
 import {
   computeReleaseContentDigest,
@@ -13,7 +13,7 @@ import {
 } from './platform-release/content.js'
 import { DEFAULT_PLATFORM_RELEASE_CONFIG_PATH, loadPlatformReleaseConfig } from './platform-release/config.js'
 import { HttpFounderOpsReleaseClient } from './platform-release/founder-ops.js'
-import { GhPlatformReleaseClient } from './platform-release/github.js'
+import { GhPlatformReleaseAnnouncementStore, GhPlatformReleaseClient } from './platform-release/github.js'
 import { readPlatformReleaseManifest, validateManifestAgainstConfig } from './platform-release/manifest.js'
 import {
   createPlatformReleasePlan,
@@ -21,7 +21,7 @@ import {
   writePlatformReleasePlan,
 } from './platform-release/plan.js'
 import { getPlatformReleaseStatus } from './platform-release/status.js'
-import type { PlatformReleaseGitHubClient } from './platform-release/types.js'
+import type { PlatformReleaseAnnouncementStore, PlatformReleaseGitHubClient } from './platform-release/types.js'
 
 type PlanOptions = { configPath: string; contentTemplate?: string; json?: boolean; output?: string; version?: string }
 type ContentOptions = { content: string; json?: boolean; plan: string }
@@ -40,12 +40,18 @@ type ApplyOptions = {
 type StatusOptions = { json?: boolean; plan: string }
 type AnnounceOptions = { configPath: string; confirmManifestDigest: string; force?: boolean; json?: boolean; manifest: string; send: boolean }
 type CliRuntime = {
+  createAnnouncementStore: () => PlatformReleaseAnnouncementStore
   createGitHubClient: () => PlatformReleaseGitHubClient
   writeStderr: (value: string) => void
   writeStdout: (value: string) => void
 }
 
 const defaultRuntime: CliRuntime = {
+  createAnnouncementStore: () => new GhPlatformReleaseAnnouncementStore(
+    process.env.GITHUB_REPOSITORY ?? 'findmydoc-platform/platform-release',
+    process.env.GITHUB_SHA ?? 'main',
+    process.env.GITHUB_STATE_TOKEN ?? '',
+  ),
   createGitHubClient: () => new GhPlatformReleaseClient(),
   writeStderr: (value) => process.stderr.write(value),
   writeStdout: (value) => process.stdout.write(value),
@@ -177,7 +183,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
           },
           plan,
           webhook: process.env.GOOGLE_CHAT_WEBHOOK_URL,
-        }, runtime.createGitHubClient(), founderOpsClient(config))
+        }, runtime.createGitHubClient(), founderOpsClient(config), runtime.createAnnouncementStore())
         if (options.json) writeJson(result, runtime.writeStdout)
         else runtime.writeStdout(`Published findmydoc ${result.version}.\n`)
       } catch (error) {
@@ -221,6 +227,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
         }
         validateManifestAgainstConfig(manifestFile.manifest, config)
         const github = runtime.createGitHubClient()
+        await assertPublishedPlatformRelease(manifestFile.manifest, github)
         for (const component of manifestFile.manifest.components) {
           await github.ensureReleaseManifest({
             manifest: manifestFile.serialized,
@@ -237,7 +244,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
           founderOpsUrl: ingested.url,
           manifest: manifestFile.manifest,
           webhook,
-        }, github)
+        }, github, runtime.createAnnouncementStore())
         writeJson({ founderOps: ingested, status, version: manifestFile.manifest.version }, runtime.writeStdout)
       } catch (error) {
         writeError(error, options.json, runtime)

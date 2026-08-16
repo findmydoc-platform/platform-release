@@ -25,8 +25,17 @@ export async function getPlatformReleaseStatus(plan: PlatformReleasePlan, github
     }] as const
   }))
   const repositories = Object.fromEntries(entries) as Record<PlatformRepositoryKey, (typeof entries)[number][1]>
-  const problems = KEYS.flatMap((key) => repositories[key].releaseMatchesTargetSha === false
-    ? [`${repositories[key].repository} ${plan.version} does not point to ${repositories[key].targetSha}.`]
-    : [])
+  const problems = KEYS.flatMap((key) => {
+    const entry = repositories[key]
+    return [
+      ...(entry.releaseMatchesTargetSha === false
+        ? [`${entry.repository} ${plan.version} does not point to ${entry.targetSha}.`]
+        : []),
+      ...(entry.release?.draft ? [`${entry.repository} ${plan.version} is still a draft.`] : []),
+      ...(entry.release?.manifestAttached === false
+        ? [`${entry.repository} ${plan.version} is missing platform-release.json.`]
+        : []),
+    ]
+  })
   return { digest: plan.digest, problems, repositories, version: plan.version }
 }

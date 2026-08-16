@@ -102,12 +102,26 @@ export type WorkflowRun = {
 export type ReleaseAnnouncementState = 'pending' | 'sent'
 
 export type PlatformReleaseDetails = {
-  announcementState?: ReleaseAnnouncementState
   body: string
+  draft: boolean
   id: number
-  publishedAt: string
+  immutable: boolean
+  manifestAttached: boolean
+  platformPublishedAt?: string
+  preparedAt: string
+  publishedAt?: string
   sha: string
   url: string
+}
+
+export type PlatformReleaseAnnouncementStore = {
+  getState(manifestDigest: string): Promise<ReleaseAnnouncementState | undefined>
+  setState(input: {
+    founderOpsUrl?: string
+    manifestDigest: string
+    state: ReleaseAnnouncementState
+    version: string
+  }): Promise<void>
 }
 
 export type ReleaseContentSection = 'dashboard' | 'platform' | 'public'
@@ -175,7 +189,7 @@ export type FounderOpsReleaseClient = {
 
 export type PlatformReleaseGitHubClient = {
   compareCommits(repository: string, base: string, head: string): Promise<ReleaseCommit[]>
-  createRelease(input: {
+  createDraftRelease(input: {
     body: string
     repository: string
     targetSha: string
@@ -198,11 +212,13 @@ export type PlatformReleaseGitHubClient = {
   getPullRequests(repository: string, commits: ReleaseCommit[]): Promise<ReleasePullRequest[]>
   getRelease(repository: string, version: string): Promise<PlatformReleaseDetails | undefined>
   isAncestor(repository: string, ancestor: string, branch: string): Promise<boolean>
-  setReleaseAnnouncementState(input: {
+  publishRelease(input: { repository: string; releaseId: number; version: string }): Promise<PlatformReleaseDetails>
+  setReleasePlatformPublishedAt(input: {
+    platformPublishedAt: string
+    releaseId: number
     repository: string
-    state: ReleaseAnnouncementState
     version: string
-  }): Promise<void>
+  }): Promise<PlatformReleaseDetails>
   ensureReleaseManifest(input: {
     manifest: string
     repository: string
