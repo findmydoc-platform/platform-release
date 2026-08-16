@@ -25,11 +25,44 @@ type GitHubRelease = {
   tag_name?: string
 }
 
+type GitHubWorkflowRun = {
+  conclusion: string | null
+  display_title: string
+  html_url: string
+  id: number
+  status: string
+}
+
+type GitHubWorkflowRunsPage = {
+  workflow_runs: GitHubWorkflowRun[]
+}
+
 const ANNOUNCEMENT_MARKER = /<!--\s*findmydoc-platform-announcement:(pending|sent)\s*-->/
+const WORKFLOW_RUNS_PAGE_SIZE = 100
 
 function announcementState(body: string | null | undefined): ReleaseAnnouncementState | undefined {
   const value = body?.match(ANNOUNCEMENT_MARKER)?.[1]
   return value === 'pending' || value === 'sent' ? value : undefined
+}
+
+export async function findWorkflowRunInPages(
+  title: string,
+  fetchPage: (page: number, perPage: number) => Promise<GitHubWorkflowRunsPage>,
+): Promise<WorkflowRun | undefined> {
+  for (let page = 1; ; page += 1) {
+    const response = await fetchPage(page, WORKFLOW_RUNS_PAGE_SIZE)
+    const run = response.workflow_runs.find((candidate) => candidate.display_title === title)
+    if (run) {
+      return {
+        conclusion: run.conclusion,
+        databaseId: run.id,
+        displayTitle: run.display_title,
+        status: run.status,
+        url: run.html_url,
+      }
+    }
+    if (response.workflow_runs.length < WORKFLOW_RUNS_PAGE_SIZE) return undefined
+  }
 }
 
 class GhError extends Error {
@@ -265,23 +298,10 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     title: string
     workflow: string
   }): Promise<WorkflowRun | undefined> {
-    const response = await api<{ workflow_runs: Array<{
-      conclusion: string | null
-      display_title: string
-      html_url: string
-      id: number
-      status: string
-    }> }>(
-      `repos/${input.repository}/actions/workflows/${encodeURIComponent(input.workflow)}/runs?event=workflow_dispatch&branch=${encodeURIComponent(input.branch)}&per_page=50`,
-    )
-    const run = response.workflow_runs.find((candidate) => candidate.display_title === input.title)
-    return run ? {
-      conclusion: run.conclusion,
-      databaseId: run.id,
-      displayTitle: run.display_title,
-      status: run.status,
-      url: run.html_url,
-    } : undefined
+    const basePath = `repos/${input.repository}/actions/workflows/${encodeURIComponent(input.workflow)}/runs?event=workflow_dispatch&branch=${encodeURIComponent(input.branch)}`
+    return findWorkflowRunInPages(input.title, async (page, perPage) => api<GitHubWorkflowRunsPage>(
+      `${basePath}&per_page=${perPage}&page=${page}`,
+    ))
   }
 
   async getRelease(repository: string, version: string): Promise<PlatformReleaseDetails | undefined> {
