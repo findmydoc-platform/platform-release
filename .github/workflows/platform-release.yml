@@ -38,23 +38,10 @@ on:
         description: Exact structured content digest required for apply mode
         required: false
         type: string
-      confirm_manifest_digest:
-        description: Exact canonical manifest digest required for recover mode
+      recovery_confirmation:
+        description: Exact recover JSON with manifest digest and confirmed legacy repository state
         required: false
         type: string
-      confirm_missing_manifest_repository:
-        description: Immutable component missing the manifest in recover mode
-        required: false
-        type: string
-      confirm_mutable_manifest_repository:
-        description: Mutable component carrying the manifest in recover mode
-        required: false
-        type: string
-      confirm_missing_platform_published_at:
-        description: Confirm both legacy releases lack stable publication metadata
-        required: true
-        default: false
-        type: boolean
       announce:
         description: Send the joint Google Chat announcement after publication
         required: true
@@ -314,27 +301,34 @@ jobs:
     environment: production-platform
     steps:
       - name: Validate recovery inputs
+        id: recovery-inputs
         env:
           CONFIRM_CONTENT_DIGEST: ${{ inputs.confirm_content_digest }}
           CONFIRM_DIGEST: ${{ inputs.confirm_digest }}
-          CONFIRM_MANIFEST_DIGEST: ${{ inputs.confirm_manifest_digest }}
-          CONFIRM_MISSING_MANIFEST_REPOSITORY: ${{ inputs.confirm_missing_manifest_repository }}
-          CONFIRM_MISSING_PLATFORM_PUBLISHED_AT: ${{ inputs.confirm_missing_platform_published_at }}
-          CONFIRM_MUTABLE_MANIFEST_REPOSITORY: ${{ inputs.confirm_mutable_manifest_repository }}
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
           PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          RECOVERY_CONFIRMATION: ${{ inputs.recovery_confirmation }}
           RELEASE_CONTENT: ${{ inputs.release_content }}
         run: |
           set -euo pipefail
           [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$CONFIRM_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CONFIRM_CONTENT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$CONFIRM_MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CONFIRM_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          test "$CONFIRM_MISSING_MANIFEST_REPOSITORY" = "findmydoc-platform/clinic-dashboard"
-          test "$CONFIRM_MUTABLE_MANIFEST_REPOSITORY" = "findmydoc-platform/website"
-          test "$CONFIRM_MISSING_PLATFORM_PUBLISHED_AT" = "true"
+          test "$(jq -c 'keys | sort' <<< "$RECOVERY_CONFIRMATION")" = '["manifestDigest","missingManifestRepository","missingPlatformPublishedAt","mutableManifestRepository"]'
+          confirm_manifest_digest="$(jq -er '.manifestDigest | select(test("^[0-9a-f]{64}$"))' <<< "$RECOVERY_CONFIRMATION")"
+          confirm_missing_manifest_repository="$(jq -er '.missingManifestRepository' <<< "$RECOVERY_CONFIRMATION")"
+          confirm_mutable_manifest_repository="$(jq -er '.mutableManifestRepository' <<< "$RECOVERY_CONFIRMATION")"
+          confirm_missing_platform_published_at="$(jq -er '.missingPlatformPublishedAt' <<< "$RECOVERY_CONFIRMATION")"
+          test "$confirm_missing_manifest_repository" = "findmydoc-platform/clinic-dashboard"
+          test "$confirm_mutable_manifest_repository" = "findmydoc-platform/website"
+          test "$confirm_missing_platform_published_at" = "true"
           test -n "$RELEASE_CONTENT"
+          {
+            echo "manifest_digest=$confirm_manifest_digest"
+            echo "missing_manifest_repository=$confirm_missing_manifest_repository"
+            echo "mutable_manifest_repository=$confirm_mutable_manifest_repository"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -403,7 +397,7 @@ jobs:
 
       - name: Download canonical manifest from complete release
         env:
-          CONFIRM_MUTABLE_MANIFEST_REPOSITORY: ${{ inputs.confirm_mutable_manifest_repository }}
+          CONFIRM_MUTABLE_MANIFEST_REPOSITORY: ${{ steps.recovery-inputs.outputs.mutable_manifest_repository }}
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -428,9 +422,9 @@ jobs:
         env:
           CONFIRM_CONTENT_DIGEST: ${{ inputs.confirm_content_digest }}
           CONFIRM_DIGEST: ${{ inputs.confirm_digest }}
-          CONFIRM_MANIFEST_DIGEST: ${{ inputs.confirm_manifest_digest }}
-          CONFIRM_MISSING_MANIFEST_REPOSITORY: ${{ inputs.confirm_missing_manifest_repository }}
-          CONFIRM_MUTABLE_MANIFEST_REPOSITORY: ${{ inputs.confirm_mutable_manifest_repository }}
+          CONFIRM_MANIFEST_DIGEST: ${{ steps.recovery-inputs.outputs.manifest_digest }}
+          CONFIRM_MISSING_MANIFEST_REPOSITORY: ${{ steps.recovery-inputs.outputs.missing_manifest_repository }}
+          CONFIRM_MUTABLE_MANIFEST_REPOSITORY: ${{ steps.recovery-inputs.outputs.mutable_manifest_repository }}
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
           FOUNDEROPS_PLATFORM_RELEASE_TOKEN: ${{ secrets.FOUNDEROPS_PLATFORM_RELEASE_TOKEN }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
