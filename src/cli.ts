@@ -51,6 +51,8 @@ type RecoverOptions = {
   confirmDigest: string
   confirmManifestDigest: string
   confirmMissingManifestRepository: string
+  confirmMissingPlatformPublishedAt: boolean
+  confirmMutableManifestRepository: string
   confirmVersion: string
   content: string
   force?: boolean
@@ -281,6 +283,8 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
     .requiredOption('--confirm-content-digest <digest>', 'must exactly match the original approved content digest')
     .requiredOption('--confirm-manifest-digest <digest>', 'must exactly match the canonical manifest digest')
     .requiredOption('--confirm-missing-manifest-repository <repository>', 'must name the single immutable release missing the manifest asset')
+    .requiredOption('--confirm-mutable-manifest-repository <repository>', 'must name the other manifest-bearing release that remains mutable')
+    .requiredOption('--confirm-missing-platform-published-at', 'explicitly accept that both legacy releases lack stable publication metadata')
     .option('--config-path <path>', 'trusted platform release configuration path', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
     .option('--apply', 'perform FounderOps ingestion and optional announcement after the read-only checks')
     .option('--announce', 'send the compact Google Chat announcement after FounderOps ingestion')
@@ -301,6 +305,8 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
           confirmDigest: options.confirmDigest,
           confirmManifestDigest: options.confirmManifestDigest,
           confirmMissingManifestRepository: options.confirmMissingManifestRepository,
+          confirmMissingPlatformPublishedAt: options.confirmMissingPlatformPublishedAt,
+          confirmMutableManifestRepository: options.confirmMutableManifestRepository,
           confirmVersion: options.confirmVersion,
           content,
           forceAnnouncement: options.force === true,

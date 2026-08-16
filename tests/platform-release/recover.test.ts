@@ -137,6 +137,8 @@ function fixture(): { github: RecoveryGitHub; input: ImmutableManifestGapRecover
     config, content, contentDigest: computeReleaseContentDigest(content), plan, releases, workflows,
   })
   const serializedManifest = serializePlatformReleaseManifest(manifest)
+  delete releases.dashboard.platformPublishedAt
+  delete releases.website.platformPublishedAt
   const github = new RecoveryGitHub(plan, releases, workflows)
   github.assets.set(config.repositories.website.repository, serializedManifest)
   return {
@@ -145,6 +147,8 @@ function fixture(): { github: RecoveryGitHub; input: ImmutableManifestGapRecover
       announce: false, config, confirmContentDigest: manifest.contentDigest, confirmDigest: plan.digest,
       confirmManifestDigest: manifest.manifestDigest,
       confirmMissingManifestRepository: config.repositories.dashboard.repository,
+      confirmMissingPlatformPublishedAt: true,
+      confirmMutableManifestRepository: config.repositories.website.repository,
       confirmVersion: plan.version, content, manifest, plan, serializedManifest,
     },
   }
@@ -167,12 +171,26 @@ describe('immutable release manifest-gap recovery', () => {
     await expect(inspectImmutableManifestGapRecovery(input, github)).rejects.toThrow('byte-identical approved manifest')
   })
 
+  it('requires the exact legacy publication metadata and mutability state to be explicit', async () => {
+    const { github, input } = fixture()
+    github.releases.website.platformPublishedAt = input.manifest.publishedAt
+    await expect(inspectImmutableManifestGapRecovery(input, github)).rejects.toThrow('missing legacy platform publication metadata')
+
+    delete github.releases.website.platformPublishedAt
+    github.releases.website.immutable = true
+    await expect(inspectImmutableManifestGapRecovery(input, github)).rejects.toThrow('confirmed mutable manifest-bearing release')
+  })
+
   it('rejects a self-consistent manifest whose deployment provenance differs', async () => {
     const { github, input } = fixture()
     const alteredWorkflows = { ...github.workflows, website: { ...github.workflows.website, url: 'https://github.com/other/run' } }
+    const manifestReleases = Object.fromEntries((['dashboard', 'website'] as PlatformRepositoryKey[]).map((key) => [key, {
+      ...github.releases[key],
+      platformPublishedAt: input.manifest.publishedAt,
+    }])) as Record<PlatformRepositoryKey, PlatformReleaseDetails>
     const alteredManifest = createPlatformReleaseManifest({
       config, content: input.content, contentDigest: input.confirmContentDigest, plan: input.plan,
-      releases: github.releases, workflows: alteredWorkflows,
+      releases: manifestReleases, workflows: alteredWorkflows,
     })
     const alteredInput = {
       ...input,

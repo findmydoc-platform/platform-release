@@ -33,6 +33,8 @@ export type ImmutableManifestGapRecoveryInput = {
   confirmDigest: string
   confirmManifestDigest: string
   confirmMissingManifestRepository: string
+  confirmMissingPlatformPublishedAt: boolean
+  confirmMutableManifestRepository: string
   confirmVersion: string
   content: PlatformReleaseContent
   forceAnnouncement?: boolean
@@ -47,6 +49,8 @@ export type ImmutableManifestGapRecoveryInspection = {
   digest: string
   manifestDigest: string
   missingManifestRepository: string
+  missingPlatformPublishedAt: true
+  mutableManifestRepository: string
   releases: Record<PlatformRepositoryKey, { immutable: boolean; manifestAttached: boolean; url: string }>
   status: 'ready'
   version: string
@@ -101,6 +105,14 @@ async function validateImmutableManifestGap(
   if (!missingKey) {
     throw new Error('The confirmed missing-manifest repository is not a configured platform component.')
   }
+  const mutableKey = REPOSITORY_KEYS.find((key) =>
+    input.config.repositories[key].repository === input.confirmMutableManifestRepository)
+  if (!mutableKey || mutableKey === missingKey) {
+    throw new Error('The confirmed mutable manifest repository must be the other configured platform component.')
+  }
+  if (!input.confirmMissingPlatformPublishedAt) {
+    throw new Error('The missing legacy platform publication metadata must be explicitly confirmed.')
+  }
   if (input.announce && !input.webhook) {
     throw new Error('GOOGLE_CHAT_WEBHOOK_URL is required with --announce.')
   }
@@ -133,6 +145,9 @@ async function validateImmutableManifestGap(
     if (!release || release.draft || !release.publishedAt || release.sha !== repository.targetSha || release.url !== component.release) {
       throw new Error(`${repository.repository} release does not match the frozen plan and approved manifest.`)
     }
+    if (release.platformPublishedAt !== undefined) {
+      throw new Error(`${repository.repository} does not match the explicitly confirmed missing legacy platform publication metadata.`)
+    }
     const expectedNotes = renderRepositoryReleaseNotes(input.plan, content, key)
     if (releaseNotesBody(release.body) !== expectedNotes.trim()) {
       throw new Error(`${repository.repository} release notes do not match the approved content.`)
@@ -143,8 +158,13 @@ async function validateImmutableManifestGap(
       if (!release.immutable || release.manifestAttached || existingManifest !== undefined) {
         throw new Error(`${repository.repository} is not the single immutable missing-manifest gap approved for recovery.`)
       }
-    } else if (!release.manifestAttached || existingManifest !== input.serializedManifest) {
-      throw new Error(`${repository.repository} must contain the byte-identical approved manifest before recovery.`)
+    } else {
+      if (release.immutable || key !== mutableKey) {
+        throw new Error(`${repository.repository} does not match the explicitly confirmed mutable manifest-bearing release.`)
+      }
+      if (!release.manifestAttached || existingManifest !== input.serializedManifest) {
+        throw new Error(`${repository.repository} must contain the byte-identical approved manifest before recovery.`)
+      }
     }
     return [key, { ...release, platformPublishedAt: input.manifest.publishedAt }] as const
   }))
@@ -166,6 +186,8 @@ async function validateImmutableManifestGap(
     digest: input.plan.digest,
     manifestDigest: input.manifest.manifestDigest,
     missingManifestRepository: input.confirmMissingManifestRepository,
+    missingPlatformPublishedAt: true,
+    mutableManifestRepository: input.confirmMutableManifestRepository,
     releases: Object.fromEntries(REPOSITORY_KEYS.map((key) => [key, {
       immutable: releasesForManifest[key].immutable,
       manifestAttached: releasesForManifest[key].manifestAttached,
