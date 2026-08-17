@@ -16,7 +16,7 @@ export type PlatformReleaseConfig = {
     ingestPath: string
   }
   platformBaselineVersion: string
-  repositories: Record<PlatformRepositoryKey, PlatformReleaseRepositoryConfig>
+  repositories: Record<string, PlatformReleaseRepositoryConfig> & Record<PlatformRepositoryKey, PlatformReleaseRepositoryConfig>
   schemaVersion: 1
 }
 
@@ -173,6 +173,98 @@ export type PlatformReleaseManifestV2 = {
   summary: string
   version: string
   visuals: ReleaseVisual[]
+}
+
+export type ReleaseMode = 'application' | 'platform'
+export type ReleaseNotificationMode = 'silent' | 'standard'
+
+export type ReleaseContentChangeV3 = {
+  commitShas: string[]
+  componentKeys: string[]
+  id: string
+  kind: ReleaseContentKind
+  pullRequests: ReleaseContentPullRequestReference[]
+  summary: string
+  title: string
+  visualUrls: string[]
+}
+
+export type ReleaseContentV3 = {
+  changes: ReleaseContentChangeV3[]
+  highlights: string[]
+  reviewAcknowledgements: string[]
+  schemaVersion: 2
+  summary: string
+}
+
+export type PlatformReleaseManifestV3 = {
+  changes: ReleaseContentChangeV3[]
+  components: Array<Omit<PlatformReleaseManifestComponent, 'deploymentRun' | 'key'> & {
+    deploymentRun: string | null
+    key: string
+  }>
+  contentDigest: string
+  highlights: string[]
+  manifestDigest: string
+  notificationMode: ReleaseNotificationMode
+  planDigest: string
+  publishedAt: string
+  releaseMode: ReleaseMode
+  schemaVersion: 3
+  source: { kind: 'native' } | { importedAt: string; kind: 'github-release-import' }
+  summary: string
+  version: string
+  visuals: ReleaseVisual[]
+}
+
+export type ReleaseManifest = PlatformReleaseManifestV2 | PlatformReleaseManifestV3
+
+export type ImportedGitHubRelease = {
+  body: string
+  publishedAt: string
+  releaseUrl: string
+  targetSha: string
+  version: string
+}
+
+export type ReleaseImportGitHubClient = {
+  compareCommits(repository: string, base: string, head: string): Promise<ReleaseCommit[]>
+  getAllCommits(repository: string, head: string): Promise<ReleaseCommit[]>
+  getPublishedReleases(repository: string): Promise<ImportedGitHubRelease[]>
+  getPullRequests(repository: string, commits: ReleaseCommit[]): Promise<ReleasePullRequest[]>
+}
+
+export type ReleaseImportPlan = {
+  component: {
+    displayName: string
+    key: string
+    productionUrl: string
+    repository: string
+  }
+  createdAt: string
+  deploymentRun: string | null
+  digest: string
+  orphanCommits: string[]
+  previousVersion: string | null
+  publishedAt: string
+  pullRequests: ReleasePullRequest[]
+  releaseNotes: string
+  releaseUrl: string
+  reviewRequired: string[]
+  schemaVersion: 1
+  targetSha: string
+  commits: ReleaseCommit[]
+  version: string
+}
+
+export type ReleaseImportBatch = {
+  digest: string
+  releases: Array<{
+    manifestDigest: string
+    manifestPath: string
+    version: string
+  }>
+  schemaVersion: 1
 }
 
 export type FounderOpsIngestResult = {

@@ -315,19 +315,34 @@ jobs:
           [[ "$CONFIRM_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CONFIRM_CONTENT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CONFIRM_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          test "$(jq -c 'keys | sort' <<< "$RECOVERY_CONFIRMATION")" = '["manifestDigest","missingManifestRepository","missingPlatformPublishedAt","mutableManifestRepository"]'
+          confirmation_keys="$(jq -c 'keys | sort' <<< "$RECOVERY_CONFIRMATION")"
+          case "$confirmation_keys" in
+            '["manifestDigest","missingManifestRepository","missingPlatformPublishedAt","mutableManifestRepository"]') publication_mode="legacy-missing" ;;
+            '["manifestDigest","missingManifestRepository","mutableManifestRepository","platformPublishedAt"]') publication_mode="present" ;;
+            *) echo "Recovery confirmation has an unsupported key set." >&2; exit 1 ;;
+          esac
           confirm_manifest_digest="$(jq -er '.manifestDigest | select(test("^[0-9a-f]{64}$"))' <<< "$RECOVERY_CONFIRMATION")"
           confirm_missing_manifest_repository="$(jq -er '.missingManifestRepository' <<< "$RECOVERY_CONFIRMATION")"
           confirm_mutable_manifest_repository="$(jq -er '.mutableManifestRepository' <<< "$RECOVERY_CONFIRMATION")"
-          confirm_missing_platform_published_at="$(jq -er '.missingPlatformPublishedAt' <<< "$RECOVERY_CONFIRMATION")"
-          test "$confirm_missing_manifest_repository" = "findmydoc-platform/clinic-dashboard"
-          test "$confirm_mutable_manifest_repository" = "findmydoc-platform/website"
-          test "$confirm_missing_platform_published_at" = "true"
+          case "$confirm_missing_manifest_repository:$confirm_mutable_manifest_repository" in
+            'findmydoc-platform/clinic-dashboard:findmydoc-platform/website' | 'findmydoc-platform/website:findmydoc-platform/clinic-dashboard') ;;
+            *) echo "Recovery repositories must be the two distinct registered platform components." >&2; exit 1 ;;
+          esac
+          platform_published_at=""
+          if [[ "$publication_mode" == "legacy-missing" ]]; then
+            test "$(jq -er '.missingPlatformPublishedAt' <<< "$RECOVERY_CONFIRMATION")" = "true"
+            test "$confirm_missing_manifest_repository" = "findmydoc-platform/clinic-dashboard"
+            test "$confirm_mutable_manifest_repository" = "findmydoc-platform/website"
+          else
+            platform_published_at="$(jq -er '.platformPublishedAt | select(test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"))' <<< "$RECOVERY_CONFIRMATION")"
+          fi
           test -n "$RELEASE_CONTENT"
           {
             echo "manifest_digest=$confirm_manifest_digest"
             echo "missing_manifest_repository=$confirm_missing_manifest_repository"
             echo "mutable_manifest_repository=$confirm_mutable_manifest_repository"
+            echo "publication_mode=$publication_mode"
+            echo "platform_published_at=$platform_published_at"
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -398,6 +413,8 @@ jobs:
       - name: Download canonical manifest from complete release
         env:
           CONFIRM_MUTABLE_MANIFEST_REPOSITORY: ${{ steps.recovery-inputs.outputs.mutable_manifest_repository }}
+          CONFIRM_PUBLICATION_MODE: ${{ steps.recovery-inputs.outputs.publication_mode }}
+          CONFIRM_PLATFORM_PUBLISHED_AT: ${{ steps.recovery-inputs.outputs.platform_published_at }}
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -444,10 +461,14 @@ jobs:
             --confirm-manifest-digest "$CONFIRM_MANIFEST_DIGEST"
             --confirm-missing-manifest-repository "$CONFIRM_MISSING_MANIFEST_REPOSITORY"
             --confirm-mutable-manifest-repository "$CONFIRM_MUTABLE_MANIFEST_REPOSITORY"
-            --confirm-missing-platform-published-at
             --apply
             --json
           )
+          if [[ "$CONFIRM_PUBLICATION_MODE" == "legacy-missing" ]]; then
+            args+=(--confirm-missing-platform-published-at)
+          else
+            args+=(--confirm-platform-published-at "$CONFIRM_PLATFORM_PUBLISHED_AT")
+          fi
           if [[ "$SEND_ANNOUNCEMENT" == "true" ]]; then
             args+=(--announce)
           fi

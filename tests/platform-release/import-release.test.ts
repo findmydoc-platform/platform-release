@@ -1,0 +1,124 @@
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  buildReleaseImportManifest,
+  createReleaseImportBatch,
+  createReleaseImportPlans,
+  ingestReleaseImportBatch,
+  releaseImportContentDigest,
+  releaseNotesPullRequests,
+  reuseReleaseImportPlan,
+  serializeReleaseImportManifest,
+  validateReleaseImportContent,
+  validateReleaseImportPlan,
+} from '../../src/platform-release/import-release.js'
+import type { PlatformReleaseConfig, ReleaseContentV3, ReleaseImportGitHubClient } from '../../src/platform-release/types.js'
+
+const config: PlatformReleaseConfig = {
+  founderOps: { baseUrl: 'https://founder-ops.findmydoc.eu', ingestPath: '/api/team/platform-releases/v1/releases' },
+  platformBaselineVersion: 'v0.45.0',
+  repositories: {
+    dashboard: { branch: 'main', deploymentWorkflow: 'deploy.yml', displayName: 'Clinic Dashboard', productionUrl: 'https://clinics.findmydoc.eu', repository: 'findmydoc-platform/clinic-dashboard', surface: 'dashboard' },
+    website: { branch: 'main', deploymentWorkflow: 'deploy.yml', displayName: 'Website', productionUrl: 'https://findmydoc.eu', repository: 'findmydoc-platform/website', surface: 'public' },
+  },
+  schemaVersion: 1,
+}
+
+const commits = [
+  { bump: 'minor' as const, message: 'feat: release', sha: 'a'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'a'.repeat(40)}` },
+  { bump: 'patch' as const, message: 'fix: orphan', sha: 'b'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'b'.repeat(40)}` },
+]
+
+function github(body = 'See https://github.com/findmydoc-platform/website/pull/42'): ReleaseImportGitHubClient {
+  return {
+    compareCommits: vi.fn(async () => commits),
+    getAllCommits: vi.fn(async () => commits),
+    getPublishedReleases: vi.fn(async () => [{ body, publishedAt: '2026-07-01T10:00:00.000Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.45.0', targetSha: 'a'.repeat(40), version: 'v0.45.0' }]),
+    getPullRequests: vi.fn(async () => [{ body: '', commitShas: ['a'.repeat(40)], issues: [], number: 42, repository: 'findmydoc-platform/website', title: 'feat: release', url: 'https://github.com/findmydoc-platform/website/pull/42', visuals: [] }]),
+  }
+}
+
+async function plan() {
+  return (await createReleaseImportPlans({ componentKey: 'website', config, versions: ['v0.45.0'] }, github()))[0]!
+}
+
+function content(): ReleaseContentV3 {
+  return {
+    changes: [{
+      commitShas: ['b'.repeat(40)],
+      componentKeys: ['website'],
+      id: 'website-release',
+      kind: 'feature',
+      pullRequests: [{ number: 42, repository: 'findmydoc-platform/website' }],
+      summary: 'Die Website bündelt die veröffentlichten Verbesserungen.',
+      title: 'Verbesserte Website',
+      visualUrls: [],
+    }],
+    highlights: ['website-release'],
+    reviewAcknowledgements: [],
+    schemaVersion: 2,
+    summary: 'Die Website bündelt die bis dahin veröffentlichten Verbesserungen.',
+  }
+}
+
+describe('release import', () => {
+  it('extracts explicit GitHub pull request references from release notes', () => {
+    expect([...releaseNotesPullRequests('A https://github.com/findmydoc-platform/website/pull/42 and https://github.com/findmydoc-platform/website/pull/42')]).toEqual(['findmydoc-platform/website#42'])
+  })
+
+  it('plans a release from the exact tag range and flags notes discrepancies', async () => {
+    const valid = await plan()
+    expect(valid.reviewRequired).toEqual([])
+    expect(valid.orphanCommits).toEqual(['b'.repeat(40)])
+    expect(validateReleaseImportPlan({ ...valid, createdAt: '2030-01-01T00:00:00.000Z' }, config).digest).toBe(valid.digest)
+    expect(reuseReleaseImportPlan(valid, { ...valid, createdAt: '2030-01-01T00:00:00.000Z' }, config).createdAt).toBe(valid.createdAt)
+
+    const discrepant = (await createReleaseImportPlans({ componentKey: 'website', config, versions: ['v0.45.0'] }, github('No pull request link')))[0]!
+    expect(discrepant.reviewRequired).toEqual(['Tag range contains findmydoc-platform/website#42, but the release notes do not reference it.'])
+  })
+
+  it('requires complete PR and orphan-commit attribution and creates a silent application manifest', async () => {
+    const releasePlan = await plan()
+    const approvedContent = validateReleaseImportContent(releasePlan, content())
+    expect(releaseImportContentDigest(approvedContent)).toMatch(/^[a-f0-9]{64}$/)
+    expect(releaseImportContentDigest({ summary: approvedContent.summary, schemaVersion: 2, reviewAcknowledgements: approvedContent.reviewAcknowledgements, highlights: approvedContent.highlights, changes: approvedContent.changes }))
+      .toBe(releaseImportContentDigest(approvedContent))
+    expect(() => validateReleaseImportContent(releasePlan, { ...content(), changes: [{ ...content().changes[0], commitShas: [] }] })).toThrow(/Every pull request and orphan commit/)
+
+    const manifest = buildReleaseImportManifest(releasePlan, approvedContent, config)
+    expect(manifest).toMatchObject({ notificationMode: 'silent', releaseMode: 'application', schemaVersion: 3, source: { kind: 'github-release-import' } })
+    expect(manifest.components).toHaveLength(1)
+    expect(manifest.components[0]?.deploymentRun).toBeNull()
+    expect(serializeReleaseImportManifest(manifest)).toContain('"schemaVersion": 3')
+  })
+
+  it('requires exact digest-bound acknowledgement of historical source discrepancies', async () => {
+    const releasePlan = (await createReleaseImportPlans(
+      { componentKey: 'website', config, versions: ['v0.45.0'] },
+      github('Historical notes without a pull request link'),
+    ))[0]!
+    expect(releasePlan.reviewRequired).toHaveLength(1)
+    expect(() => validateReleaseImportContent(releasePlan, content())).toThrow('acknowledge every exact plan review finding')
+    const acknowledged = { ...content(), reviewAcknowledgements: [...releasePlan.reviewRequired] }
+    expect(validateReleaseImportContent(releasePlan, acknowledged).reviewAcknowledgements).toEqual(releasePlan.reviewRequired)
+    expect(buildReleaseImportManifest(releasePlan, acknowledged, config).source.kind).toBe('github-release-import')
+  })
+
+  it('ingests a confirmed batch in order and reuses stored manifests on replay', async () => {
+    const releasePlan = await plan()
+    const manifest = buildReleaseImportManifest(releasePlan, content(), config)
+    const directory = await mkdtemp(join(tmpdir(), 'release-import-'))
+    const releaseDirectory = join(directory, manifest.version)
+    await import('node:fs/promises').then(({ mkdir }) => mkdir(releaseDirectory, { recursive: true }))
+    await writeFile(join(releaseDirectory, 'platform-release.json'), serializeReleaseImportManifest(manifest), 'utf8')
+    const batch = createReleaseImportBatch([{ manifestDigest: manifest.manifestDigest, manifestPath: `${manifest.version}/platform-release.json`, version: manifest.version }])
+    const batchPath = join(directory, 'batch.json')
+    await writeFile(batchPath, `${JSON.stringify(batch, null, 2)}\n`, 'utf8')
+    const ingestManifest = vi.fn(async () => ({ replayed: true, url: `https://founder-ops.findmydoc.eu/team/platform-releases/${manifest.version}` }))
+    const result = await ingestReleaseImportBatch({ apply: true, batchPath, config, confirmBatchDigest: batch.digest }, { ingestManifest })
+    expect(result).toEqual([{ replayed: true, url: `https://founder-ops.findmydoc.eu/team/platform-releases/${manifest.version}`, version: manifest.version }])
+    expect(ingestManifest).toHaveBeenCalledTimes(1)
+  })
+})

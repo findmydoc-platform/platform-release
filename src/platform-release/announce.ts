@@ -1,7 +1,7 @@
 import type {
   PlatformReleaseAnnouncementStore,
   PlatformReleaseGitHubClient,
-  PlatformReleaseManifestV2,
+  ReleaseManifest,
 } from './types.js'
 
 function webhookUrl(raw: string, threadKey: string): URL {
@@ -20,14 +20,23 @@ function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;')
 }
 
+export function assertAnnounceablePlatformManifest(manifest: ReleaseManifest): void {
+  if (manifest.schemaVersion === 3 && (
+    manifest.releaseMode !== 'platform' || manifest.notificationMode !== 'standard' || manifest.source.kind !== 'native'
+  )) {
+    throw new Error('Only native platform manifests with standard notifications can be announced.')
+  }
+}
+
 export async function announcePlatformRelease(
   input: {
     founderOpsUrl: string
-    manifest: PlatformReleaseManifestV2
+    manifest: ReleaseManifest
     webhook: string
   },
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
+  assertAnnounceablePlatformManifest(input.manifest)
   const response = await fetchImpl(webhookUrl(input.webhook, `platform-release-${input.manifest.version.replace(/^v/, '')}`), {
     body: JSON.stringify({
       cardsV2: [{
@@ -53,7 +62,7 @@ export async function announcePlatformRelease(
 }
 
 export async function assertPublishedPlatformRelease(
-  manifest: PlatformReleaseManifestV2,
+  manifest: ReleaseManifest,
   github: PlatformReleaseGitHubClient,
   options: { allowedMissingManifestRepository?: string } = {},
 ): Promise<void> {
@@ -74,7 +83,7 @@ export async function announcePlatformReleaseOnce(
   input: {
     forcePending?: boolean
     founderOpsUrl: string
-    manifest: PlatformReleaseManifestV2
+    manifest: ReleaseManifest
     allowedMissingManifestRepository?: string
     webhook: string
   },
@@ -82,6 +91,7 @@ export async function announcePlatformReleaseOnce(
   announcementStore: PlatformReleaseAnnouncementStore,
   fetchImpl: typeof fetch = fetch,
 ): Promise<'already_sent' | 'sent'> {
+  assertAnnounceablePlatformManifest(input.manifest)
   await assertPublishedPlatformRelease(input.manifest, github, {
     allowedMissingManifestRepository: input.allowedMissingManifestRepository,
   })

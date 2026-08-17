@@ -103,4 +103,22 @@ describe('platform release announcement resume', () => {
     await expect(announcePlatformReleaseOnce(input(), client, store, fetchMock)).rejects.toThrow('HTTP 500')
     expect(states).toEqual(['pending'])
   })
+
+  it('rejects silent application manifests before GitHub state or Google Chat mutations', async () => {
+    const { client, states, store } = announcementGitHub()
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }))
+    const silentManifest = {
+      ...manifest(),
+      schemaVersion: 3 as const,
+      releaseMode: 'application' as const,
+      notificationMode: 'silent' as const,
+      source: { kind: 'github-release-import' as const, importedAt: '2026-08-17T10:00:00.000Z' },
+      components: [manifest().components[1]!],
+      changes: [],
+    }
+    await expect(announcePlatformReleaseOnce({ ...input(), manifest: silentManifest }, client, store, fetchMock))
+      .rejects.toThrow('Only native platform manifests')
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(states).toEqual([])
+  })
 })

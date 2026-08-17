@@ -17,11 +17,23 @@ export async function loadPlatformReleaseConfig(path = DEFAULT_PLATFORM_RELEASE_
     founderOpsUrl.search || founderOpsUrl.hash) {
     throw new Error('FounderOps release ingestion must use a same-origin HTTPS path without credentials or query parameters.')
   }
-  for (const key of ['dashboard', 'website'] as const) {
-    const repository = parsed.repositories[key]
-    if (!repository?.repository || !repository.branch || !repository.deploymentWorkflow || !repository.displayName) {
+  const repositoryEntries = Object.entries(parsed.repositories ?? {})
+  const trustedKeys = ['dashboard', 'website']
+  if (repositoryEntries.length !== trustedKeys.length || repositoryEntries.some(([key]) => !trustedKeys.includes(key))) {
+    throw new Error('Platform release component catalog must contain exactly dashboard and website.')
+  }
+  for (const [key, repository] of repositoryEntries) {
+    if (!/^[a-z][a-z0-9-]{0,63}$/.test(key) || !repository?.repository || !repository.branch ||
+      !repository.deploymentWorkflow || !repository.displayName || !repository.productionUrl) {
       throw new Error(`Platform release repository configuration is incomplete for ${key}.`)
     }
+    const productionUrl = new URL(repository.productionUrl)
+    if (productionUrl.protocol !== 'https:' || productionUrl.username || productionUrl.password || productionUrl.search || productionUrl.hash) {
+      throw new Error(`Platform release production URL is invalid for ${key}.`)
+    }
+  }
+  for (const key of ['dashboard', 'website'] as const) {
+    if (!parsed.repositories[key]) throw new Error(`Joint platform release configuration is missing ${key}.`)
   }
   return parsed
 }

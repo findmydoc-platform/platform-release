@@ -199,7 +199,10 @@ describe('platform release apply', () => {
     expect(github.dispatches).toEqual(['findmydoc-platform/clinic-dashboard', 'findmydoc-platform/website'])
     expect(github.manifests).toHaveLength(2)
     expect(github.manifests[0]).toBe(github.manifests[1])
-    expect(JSON.parse(github.manifests[0] ?? '{}')).toMatchObject({ publishedAt: '2026-08-12T11:59:30.000Z' })
+    expect(JSON.parse(github.manifests[0] ?? '{}')).toMatchObject({
+      notificationMode: 'standard', publishedAt: '2026-08-12T11:59:30.000Z', releaseMode: 'platform', schemaVersion: 3,
+      source: { kind: 'native' },
+    })
     expect(github.maxManifestCallsInFlight).toBe(1)
     expect(github.events.indexOf('publish:findmydoc-platform/clinic-dashboard'))
       .toBeGreaterThan(github.events.lastIndexOf('manifest:findmydoc-platform/website'))

@@ -8,6 +8,7 @@ import type {
   PlatformReleaseAnnouncementStore,
   PlatformReleaseGitHubClient,
   PlatformReleaseDetails,
+  ImportedGitHubRelease,
   ReleaseAnnouncementState,
   ReleaseCommit,
   ReleaseIssue,
@@ -104,8 +105,6 @@ export function githubChildEnvironment(environment: NodeJS.ProcessEnv = process.
     'APPDATA',
     'COMSPEC',
     'GH_CONFIG_DIR',
-    'GH_ENTERPRISE_TOKEN',
-    'GH_HOST',
     'GH_TOKEN',
     'GITHUB_TOKEN',
     'HOME',
@@ -121,6 +120,16 @@ export function githubChildEnvironment(environment: NodeJS.ProcessEnv = process.
     'XDG_CONFIG_HOME',
   ] as const
   return Object.fromEntries(allowlist.flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]]]))
+}
+
+export function assertLinearReleaseComparison(
+  repository: string,
+  base: string,
+  comparison: { merge_base_commit: { sha: string }; status: string },
+): void {
+  if (comparison.status !== 'ahead' || comparison.merge_base_commit.sha !== base) {
+    throw new Error(`${repository} release tags are not a linear ancestor range (${comparison.status}).`)
+  }
 }
 
 async function runGh(args: string[], input?: string, environment: NodeJS.ProcessEnv = process.env): Promise<string> {
@@ -150,7 +159,7 @@ async function api<T>(
   options: { method?: string; body?: unknown } = {},
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<T> {
-  const args = ['api', path]
+  const args = ['api', '--hostname', 'github.com', path]
   if (options.method) args.push('--method', options.method)
   if (options.body !== undefined) args.push('--input', '-')
   const output = await runGh(args, options.body === undefined ? undefined : JSON.stringify(options.body), environment)
@@ -167,10 +176,13 @@ async function optionalApi<T>(path: string): Promise<T | undefined> {
 }
 
 async function resolveTagSha(repository: string, tag: string): Promise<string> {
-  const ref = await api<{ object: { sha: string; type: string } }>(`repos/${repository}/git/ref/tags/${encodeURIComponent(tag)}`)
-  if (ref.object.type !== 'tag') return ref.object.sha
-  const annotated = await api<{ object: { sha: string } }>(`repos/${repository}/git/tags/${ref.object.sha}`)
-  return annotated.object.sha
+  let object = (await api<{ object: { sha: string; type: string } }>(`repos/${repository}/git/ref/tags/${encodeURIComponent(tag)}`)).object
+  for (let depth = 0; object.type === 'tag'; depth += 1) {
+    if (depth >= 10) throw new Error(`${repository} ${tag} exceeds the supported annotated-tag depth.`)
+    object = (await api<{ object: { sha: string; type: string } }>(`repos/${repository}/git/tags/${object.sha}`)).object
+  }
+  if (object.type !== 'commit') throw new Error(`${repository} ${tag} does not resolve to a commit.`)
+  return object.sha
 }
 
 function releaseUrl(repository: string, version: string): string {
@@ -216,6 +228,8 @@ async function closingIssues(repository: string, number: number): Promise<Releas
   const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){closingIssuesReferences(first:30){nodes{number title url repository{nameWithOwner}}}}}}`
   const output = await runGh([
     'api',
+    '--hostname',
+    'github.com',
     'graphql',
     '--field',
     `query=${query}`,
@@ -272,6 +286,49 @@ function compactPullRequestBody(markdown: string): string {
 }
 
 export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
+  async getPublishedReleases(repository: string): Promise<ImportedGitHubRelease[]> {
+    const releases: GitHubRelease[] = []
+    for (let page = 1; ; page += 1) {
+      const response = await api<GitHubRelease[]>(`repos/${repository}/releases?per_page=100&page=${page}`)
+      releases.push(...response)
+      if (response.length < 100) break
+    }
+    const eligible = releases.filter((release) => {
+      if (release.draft || release.prerelease || !release.tag_name || !release.published_at) return false
+      try {
+        parseVersion(release.tag_name)
+        return true
+      } catch {
+        return false
+      }
+    })
+    return Promise.all(eligible.sort((left, right) => compareVersions(left.tag_name ?? '', right.tag_name ?? '')).map(async (release) => ({
+      body: release.body ?? '',
+      publishedAt: release.published_at!,
+      releaseUrl: releaseUrl(repository, release.tag_name!),
+      targetSha: await resolveTagSha(repository, release.tag_name!),
+      version: release.tag_name!,
+    })))
+  }
+
+  async getAllCommits(repository: string, head: string): Promise<ReleaseCommit[]> {
+    const commits: ReleaseCommit[] = []
+    for (let page = 1; ; page += 1) {
+      const response = await api<Array<{ commit: { message: string }; html_url: string; sha: string }>>(
+        `repos/${repository}/commits?sha=${encodeURIComponent(head)}&per_page=100&page=${page}`,
+      )
+      commits.push(...response.map((commit) => ({
+        bump: bumpForMessage(commit.commit.message),
+        message: commit.commit.message,
+        sha: commit.sha,
+        url: commit.html_url,
+      })))
+      if (response.length < 100) break
+      if (page >= 100) throw new Error(`${repository} exceeds the supported 10,000-commit import history.`)
+    }
+    return commits.reverse()
+  }
+
   async getBranchSha(repository: string, branch: string): Promise<string> {
     const commit = await api<{ sha: string }>(`repos/${repository}/commits/${encodeURIComponent(branch)}`)
     return commit.sha
@@ -298,8 +355,11 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   async compareCommits(repository: string, base: string, head: string): Promise<ReleaseCommit[]> {
     const comparison = await api<{
       commits: Array<{ commit: { message: string }; html_url: string; sha: string }>
+      merge_base_commit: { sha: string }
+      status: string
       total_commits: number
     }>(`repos/${repository}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`)
+    assertLinearReleaseComparison(repository, base, comparison)
     if (comparison.total_commits > comparison.commits.length) {
       throw new Error(`${repository} has ${comparison.total_commits} commits in the release range, exceeding the GitHub comparison response.`)
     }
@@ -462,6 +522,8 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     if (!asset.id) throw new Error(`${repository} platform-release.json has no asset ID.`)
     return runGh([
       'api',
+      '--hostname',
+      'github.com',
       '--header',
       'Accept: application/octet-stream',
       `repos/${repository}/releases/assets/${asset.id}`,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   assertMatchingReleaseManifest,
+  assertLinearReleaseComparison,
   findWorkflowRunInPages,
   GhPlatformReleaseAnnouncementStore,
   githubChildEnvironment,
@@ -27,6 +28,8 @@ describe('GitHub release manifest resume', () => {
   it('preserves cross-platform GitHub CLI configuration without forwarding unrelated secrets', () => {
     expect(githubChildEnvironment({
       APPDATA: 'windows-config',
+      GH_ENTERPRISE_TOKEN: 'enterprise-token',
+      GH_HOST: 'github.example.test',
       GH_TOKEN: 'github-token',
       HOME: 'unix-home',
       PATH: 'commands',
@@ -51,6 +54,15 @@ describe('GitHub release manifest resume', () => {
     expect(detail).toContain('Authorization: Bearer [redacted]')
     expect(detail).not.toContain('exampleSecret')
     expect(detail).not.toContain('another-secret')
+  })
+
+  it('rejects non-linear historical release tag ranges', () => {
+    expect(() => assertLinearReleaseComparison('org/repo', 'a'.repeat(40), {
+      merge_base_commit: { sha: 'b'.repeat(40) }, status: 'diverged',
+    })).toThrow('not a linear ancestor range')
+    expect(() => assertLinearReleaseComparison('org/repo', 'a'.repeat(40), {
+      merge_base_commit: { sha: 'a'.repeat(40) }, status: 'ahead',
+    })).not.toThrow()
   })
 
   it('finds an existing deployment run beyond the first workflow-runs page', async () => {
