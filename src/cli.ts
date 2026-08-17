@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
-import { mkdir, writeFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { announcePlatformReleaseOnce, assertPublishedPlatformRelease } from './platform-release/announce.js'
+import { announcePlatformReleaseOnce, assertAnnounceablePlatformManifest, assertPublishedPlatformRelease } from './platform-release/announce.js'
 import { applyPlatformRelease } from './platform-release/apply.js'
 import {
   computeReleaseContentDigest,
@@ -16,6 +16,18 @@ import { HttpFounderOpsReleaseClient } from './platform-release/founder-ops.js'
 import { GhPlatformReleaseAnnouncementStore, GhPlatformReleaseClient } from './platform-release/github.js'
 import { readPlatformReleaseManifest, validateManifestAgainstConfig } from './platform-release/manifest.js'
 import {
+  buildReleaseImportManifest,
+  createReleaseImportBatch,
+  createReleaseImportPlans,
+  ingestReleaseImportBatch,
+  releaseImportContentTemplate,
+  releaseImportContentDigest,
+  reuseReleaseImportPlan,
+  serializeReleaseImportManifest,
+  validateReleaseImportContent,
+  validateReleaseImportPlan,
+} from './platform-release/import-release.js'
+import {
   createPlatformReleasePlan,
   readPlatformReleasePlan,
   writePlatformReleasePlan,
@@ -25,7 +37,7 @@ import {
   recoverImmutableManifestGap,
 } from './platform-release/recover.js'
 import { getPlatformReleaseStatus } from './platform-release/status.js'
-import type { PlatformReleaseAnnouncementStore, PlatformReleaseGitHubClient } from './platform-release/types.js'
+import type { PlatformReleaseAnnouncementStore, PlatformReleaseGitHubClient, ReleaseImportGitHubClient, ReleaseImportPlan } from './platform-release/types.js'
 
 type PlanOptions = { configPath: string; contentTemplate?: string; json?: boolean; output?: string; version?: string }
 type ContentOptions = { content: string; json?: boolean; plan: string }
@@ -51,7 +63,8 @@ type RecoverOptions = {
   confirmDigest: string
   confirmManifestDigest: string
   confirmMissingManifestRepository: string
-  confirmMissingPlatformPublishedAt: boolean
+  confirmMissingPlatformPublishedAt?: boolean
+  confirmPlatformPublishedAt?: string
   confirmMutableManifestRepository: string
   confirmVersion: string
   content: string
@@ -60,9 +73,13 @@ type RecoverOptions = {
   manifest: string
   plan: string
 }
+type ImportPlanOptions = { archiveRoot: string; componentKey: string; configPath: string; deploymentRuns?: string; json?: boolean; versions: string }
+type ImportBuildOptions = { archiveRoot: string; batchOutput: string; configPath: string; json?: boolean; versions: string }
+type ImportIngestOptions = { apply: boolean; batch: string; configPath: string; confirmBatchDigest: string; json?: boolean }
 type CliRuntime = {
   createAnnouncementStore: () => PlatformReleaseAnnouncementStore
   createGitHubClient: () => PlatformReleaseGitHubClient
+  createReleaseImportGitHubClient: () => ReleaseImportGitHubClient
   writeStderr: (value: string) => void
   writeStdout: (value: string) => void
 }
@@ -74,6 +91,7 @@ const defaultRuntime: CliRuntime = {
     process.env.GITHUB_STATE_TOKEN ?? '',
   ),
   createGitHubClient: () => new GhPlatformReleaseClient(),
+  createReleaseImportGitHubClient: () => new GhPlatformReleaseClient(),
   writeStderr: (value) => process.stderr.write(value),
   writeStdout: (value) => process.stdout.write(value),
 }
@@ -103,10 +121,45 @@ function founderOpsClient(config: Awaited<ReturnType<typeof loadPlatformReleaseC
   )
 }
 
+function commaSeparatedVersions(value: string): string[] {
+  const versions = value.split(',').map((version) => version.trim()).filter(Boolean)
+  if (versions.length === 0) throw new Error('--versions must contain at least one version.')
+  return versions
+}
+
+async function writeImmutable(path: string, value: string): Promise<void> {
+  const absolutePath = resolve(path)
+  try {
+    const existing = await readFile(absolutePath, 'utf8')
+    if (existing !== value) throw new Error(`Refusing to replace differing release import artifact: ${absolutePath}.`)
+    return
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  await mkdir(dirname(absolutePath), { recursive: true })
+  await writeFile(absolutePath, value, 'utf8')
+}
+
+async function writeImportPlanImmutable(
+  path: string,
+  plan: ReleaseImportPlan,
+  config: Awaited<ReturnType<typeof loadPlatformReleaseConfig>>,
+): Promise<ReleaseImportPlan> {
+  const absolutePath = resolve(path)
+  try {
+    return reuseReleaseImportPlan(JSON.parse(await readFile(absolutePath, 'utf8')), plan, config)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  await mkdir(dirname(absolutePath), { recursive: true })
+  await writeFile(absolutePath, canonicalArtifact(plan), 'utf8')
+  return plan
+}
+
 export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Command {
   const runtime = { ...defaultRuntime, ...runtimeOverrides }
   const program = new Command()
-  program.name('fmd-platform-release').description('Publish one findmydoc version across both applications').version('0.2.0')
+  program.name('fmd-platform-release').description('Publish and archive findmydoc application and platform releases').version('0.3.0')
   program.configureOutput({
     outputError: (value, write) => write(value),
     writeErr: runtime.writeStderr,
@@ -246,6 +299,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
         if (options.confirmManifestDigest !== manifestFile.manifest.manifestDigest) {
           throw new Error(`Manifest digest confirmation must exactly match ${manifestFile.manifest.manifestDigest}.`)
         }
+        assertAnnounceablePlatformManifest(manifestFile.manifest)
         validateManifestAgainstConfig(manifestFile.manifest, config)
         const github = runtime.createGitHubClient()
         await assertPublishedPlatformRelease(manifestFile.manifest, github)
@@ -284,7 +338,8 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
     .requiredOption('--confirm-manifest-digest <digest>', 'must exactly match the canonical manifest digest')
     .requiredOption('--confirm-missing-manifest-repository <repository>', 'must name the single immutable release missing the manifest asset')
     .requiredOption('--confirm-mutable-manifest-repository <repository>', 'must name the other manifest-bearing release that remains mutable')
-    .requiredOption('--confirm-missing-platform-published-at', 'explicitly accept that both legacy releases lack stable publication metadata')
+    .option('--confirm-missing-platform-published-at', 'explicitly accept that both legacy Manifest v2 releases lack stable publication metadata')
+    .option('--confirm-platform-published-at <timestamp>', 'confirm the stable publication timestamp for Manifest v3 recovery')
     .option('--config-path <path>', 'trusted platform release configuration path', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
     .option('--apply', 'perform FounderOps ingestion and optional announcement after the read-only checks')
     .option('--announce', 'send the compact Google Chat announcement after FounderOps ingestion')
@@ -306,6 +361,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
           confirmManifestDigest: options.confirmManifestDigest,
           confirmMissingManifestRepository: options.confirmMissingManifestRepository,
           confirmMissingPlatformPublishedAt: options.confirmMissingPlatformPublishedAt,
+          confirmPlatformPublishedAt: options.confirmPlatformPublishedAt,
           confirmMutableManifestRepository: options.confirmMutableManifestRepository,
           confirmVersion: options.confirmVersion,
           content,
@@ -330,7 +386,117 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
       }
     })
 
+  const importReleases = program
+    .command('import-releases')
+    .description('Plan, build, or ingest silent releases from registered applications')
+
+  importReleases
+    .command('plan')
+    .description('Create read-only release import plans from published GitHub releases')
+    .requiredOption('--component-key <key>', 'registered application component key')
+    .requiredOption('--versions <versions>', 'comma-separated semantic versions; maximum eight')
+    .requiredOption('--archive-root <path>', 'directory that receives one version directory per release')
+    .option('--deployment-runs <path>', 'optional JSON object mapping versions to GitHub deployment run URLs')
+    .option('--config-path <path>', 'trusted release component catalog', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
+    .option('--json', 'emit JSON output')
+    .action(async (options: ImportPlanOptions) => {
+      try {
+        const config = await loadPlatformReleaseConfig(options.configPath)
+        const deploymentRuns = options.deploymentRuns
+          ? JSON.parse(await readFile(resolve(options.deploymentRuns), 'utf8')) as Record<string, string | null>
+          : undefined
+        const plans = await createReleaseImportPlans({
+          componentKey: options.componentKey,
+          config,
+          deploymentRuns,
+          versions: commaSeparatedVersions(options.versions),
+        }, runtime.createReleaseImportGitHubClient())
+        const effectivePlans = []
+        for (const plan of plans) {
+          const releaseDirectory = resolve(options.archiveRoot, plan.version)
+          const effectivePlan = await writeImportPlanImmutable(resolve(releaseDirectory, 'plan.json'), plan, config)
+          await writeImmutable(resolve(releaseDirectory, 'release-content.template.json'), canonicalArtifact(releaseImportContentTemplate(effectivePlan)))
+          effectivePlans.push(effectivePlan)
+        }
+        const result = { plans: effectivePlans.map((plan) => ({ digest: plan.digest, reviewRequired: plan.reviewRequired, version: plan.version })), status: 'planned' }
+        if (options.json) writeJson(result, runtime.writeStdout)
+        else runtime.writeStdout(`${plans.length} release import plan(s) created.\n`)
+      } catch (error) {
+        writeError(error, options.json, runtime)
+      }
+    })
+
+  importReleases
+    .command('build')
+    .description('Validate approved content and build one silent Manifest v3 batch')
+    .requiredOption('--versions <versions>', 'comma-separated semantic versions; maximum eight')
+    .requiredOption('--archive-root <path>', 'directory containing version archives')
+    .requiredOption('--batch-output <path>', 'batch index path directly below the archive root')
+    .option('--config-path <path>', 'trusted release component catalog', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
+    .option('--json', 'emit JSON output')
+    .action(async (options: ImportBuildOptions) => {
+      try {
+        const config = await loadPlatformReleaseConfig(options.configPath)
+        const archiveRoot = resolve(options.archiveRoot)
+        const batchOutput = resolve(options.batchOutput)
+        if (dirname(batchOutput) !== archiveRoot) throw new Error('--batch-output must be directly below --archive-root.')
+        const entries = []
+        const releases = []
+        for (const version of commaSeparatedVersions(options.versions)) {
+          const releaseDirectory = resolve(archiveRoot, version)
+          const plan = validateReleaseImportPlan(JSON.parse(await readFile(resolve(releaseDirectory, 'plan.json'), 'utf8')), config)
+          if (plan.version !== version) throw new Error(`Archive directory ${version} contains plan ${plan.version}.`)
+          const content = validateReleaseImportContent(plan, JSON.parse(await readFile(resolve(releaseDirectory, 'release-content.json'), 'utf8')))
+          const manifest = buildReleaseImportManifest(plan, content, config)
+          const manifestPath = resolve(releaseDirectory, 'platform-release.json')
+          await writeImmutable(manifestPath, serializeReleaseImportManifest(manifest))
+          entries.push({ manifestDigest: manifest.manifestDigest, manifestPath: relative(archiveRoot, manifestPath), version })
+          releases.push({
+            content,
+            contentDigest: releaseImportContentDigest(content),
+            manifestDigest: manifest.manifestDigest,
+            planDigest: plan.digest,
+            version,
+          })
+        }
+        const batch = createReleaseImportBatch(entries)
+        await writeImmutable(batchOutput, canonicalArtifact(batch))
+        if (options.json) writeJson({ batch, batchPath: batchOutput, releases, status: 'built' }, runtime.writeStdout)
+        else runtime.writeStdout(`Release import batch ${batch.digest} built.\n`)
+      } catch (error) {
+        writeError(error, options.json, runtime)
+      }
+    })
+
+  importReleases
+    .command('ingest')
+    .description('Ingest one confirmed silent release batch into FounderOps')
+    .requiredOption('--batch <path>', 'approved release import batch index')
+    .requiredOption('--confirm-batch-digest <digest>', 'must exactly match the approved batch digest')
+    .requiredOption('--apply', 'perform FounderOps ingestion')
+    .option('--config-path <path>', 'FounderOps endpoint configuration', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
+    .option('--json', 'emit JSON output')
+    .action(async (options: ImportIngestOptions) => {
+      try {
+        const config = await loadPlatformReleaseConfig(options.configPath)
+        const releases = await ingestReleaseImportBatch({
+          apply: options.apply,
+          batchPath: options.batch,
+          config,
+          confirmBatchDigest: options.confirmBatchDigest,
+        }, founderOpsClient(config))
+        if (options.json) writeJson({ releases, status: 'ingested' }, runtime.writeStdout)
+        else runtime.writeStdout(`${releases.length} release(s) ingested.\n`)
+      } catch (error) {
+        writeError(error, options.json, runtime)
+      }
+    })
+
   return program
+}
+
+function canonicalArtifact(value: unknown): string {
+  return `${JSON.stringify(value, null, 2)}\n`
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -1,6 +1,6 @@
 import { announcePlatformReleaseOnce } from './announce.js'
 import { computeReleaseContentDigest, renderRepositoryReleaseNotes, validateReleaseContent } from './content.js'
-import { createPlatformReleaseManifest, serializePlatformReleaseManifest } from './manifest.js'
+import { createPlatformReleaseManifestV3, serializeReleaseManifest } from './manifest.js'
 import {
   platformDeploymentWorkflowTitle,
   validatePlanAgainstConfig,
@@ -184,7 +184,7 @@ export async function applyPlatformRelease(
     })
   }
 
-  const manifest = createPlatformReleaseManifest({
+  const manifest = createPlatformReleaseManifestV3({
     config: input.config,
     content,
     contentDigest,
@@ -192,7 +192,7 @@ export async function applyPlatformRelease(
     releases: releaseDetails,
     workflows,
   })
-  const serializedManifest = serializePlatformReleaseManifest(manifest)
+  const serializedManifest = serializeReleaseManifest(manifest)
   await input.onManifest?.(serializedManifest)
   for (const key of REPOSITORY_KEYS) {
     await github.ensureReleaseManifest({

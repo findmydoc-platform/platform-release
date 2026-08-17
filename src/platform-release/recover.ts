@@ -3,7 +3,8 @@ import { releaseNotesBody } from './apply.js'
 import { computeReleaseContentDigest, renderRepositoryReleaseNotes, validateReleaseContent } from './content.js'
 import {
   createPlatformReleaseManifest,
-  serializePlatformReleaseManifest,
+  createPlatformReleaseManifestV3,
+  serializeReleaseManifest,
   validateManifestAgainstConfig,
 } from './manifest.js'
 import {
@@ -18,9 +19,9 @@ import type {
   PlatformReleaseContent,
   PlatformReleaseDetails,
   PlatformReleaseGitHubClient,
-  PlatformReleaseManifestV2,
   PlatformReleasePlan,
   PlatformRepositoryKey,
+  ReleaseManifest,
   WorkflowRun,
 } from './types.js'
 
@@ -33,12 +34,13 @@ export type ImmutableManifestGapRecoveryInput = {
   confirmDigest: string
   confirmManifestDigest: string
   confirmMissingManifestRepository: string
-  confirmMissingPlatformPublishedAt: boolean
+  confirmMissingPlatformPublishedAt?: boolean
+  confirmPlatformPublishedAt?: string
   confirmMutableManifestRepository: string
   confirmVersion: string
   content: PlatformReleaseContent
   forceAnnouncement?: boolean
-  manifest: PlatformReleaseManifestV2
+  manifest: ReleaseManifest
   plan: PlatformReleasePlan
   serializedManifest: string
   webhook?: string
@@ -49,7 +51,8 @@ export type ImmutableManifestGapRecoveryInspection = {
   digest: string
   manifestDigest: string
   missingManifestRepository: string
-  missingPlatformPublishedAt: true
+  missingPlatformPublishedAt?: true
+  platformPublishedAt?: string
   mutableManifestRepository: string
   releases: Record<PlatformRepositoryKey, { immutable: boolean; manifestAttached: boolean; url: string }>
   status: 'ready'
@@ -61,7 +64,7 @@ type ValidatedRecovery = ImmutableManifestGapRecoveryInspection & {
   releasesForManifest: Record<PlatformRepositoryKey, PlatformReleaseDetails>
 }
 
-function manifestComponent(manifest: PlatformReleaseManifestV2, key: PlatformRepositoryKey) {
+function manifestComponent(manifest: ReleaseManifest, key: PlatformRepositoryKey) {
   const component = manifest.components.find((entry) => entry.key === key)
   if (!component) throw new Error(`Platform release manifest is missing the ${key} component.`)
   return component
@@ -91,7 +94,7 @@ async function validateImmutableManifestGap(
   const content = validateReleaseContent(input.plan, input.content)
   const contentDigest = computeReleaseContentDigest(content)
   validateManifestAgainstConfig(input.manifest, input.config)
-  if (serializePlatformReleaseManifest(input.manifest) !== input.serializedManifest) {
+  if (serializeReleaseManifest(input.manifest) !== input.serializedManifest) {
     throw new Error('The supplied manifest bytes are not the canonical approved manifest.')
   }
   assertConfirmations(input, contentDigest)
@@ -110,8 +113,11 @@ async function validateImmutableManifestGap(
   if (!mutableKey || mutableKey === missingKey) {
     throw new Error('The confirmed mutable manifest repository must be the other configured platform component.')
   }
-  if (!input.confirmMissingPlatformPublishedAt) {
-    throw new Error('The missing legacy platform publication metadata must be explicitly confirmed.')
+  if (input.manifest.schemaVersion === 2 && !input.confirmMissingPlatformPublishedAt) {
+    throw new Error('The missing legacy platform publication metadata must be explicitly confirmed for Manifest v2.')
+  }
+  if (input.manifest.schemaVersion === 3 && input.confirmPlatformPublishedAt !== input.manifest.publishedAt) {
+    throw new Error(`Platform publication timestamp confirmation must exactly match ${input.manifest.publishedAt}.`)
   }
   if (input.announce && !input.webhook) {
     throw new Error('GOOGLE_CHAT_WEBHOOK_URL is required with --announce.')
@@ -145,8 +151,11 @@ async function validateImmutableManifestGap(
     if (!release || release.draft || !release.publishedAt || release.sha !== repository.targetSha || release.url !== component.release) {
       throw new Error(`${repository.repository} release does not match the frozen plan and approved manifest.`)
     }
-    if (release.platformPublishedAt !== undefined) {
+    if (input.manifest.schemaVersion === 2 && release.platformPublishedAt !== undefined) {
       throw new Error(`${repository.repository} does not match the explicitly confirmed missing legacy platform publication metadata.`)
+    }
+    if (input.manifest.schemaVersion === 3 && release.platformPublishedAt !== input.manifest.publishedAt) {
+      throw new Error(`${repository.repository} does not match the confirmed platform publication timestamp.`)
     }
     const expectedNotes = renderRepositoryReleaseNotes(input.plan, content, key)
     if (releaseNotesBody(release.body) !== expectedNotes.trim()) {
@@ -169,14 +178,10 @@ async function validateImmutableManifestGap(
     return [key, { ...release, platformPublishedAt: input.manifest.publishedAt }] as const
   }))
   const releasesForManifest = Object.fromEntries(releaseEntries) as Record<PlatformRepositoryKey, PlatformReleaseDetails>
-  const expectedManifest = serializePlatformReleaseManifest(createPlatformReleaseManifest({
-    config: input.config,
-    content,
-    contentDigest,
-    plan: input.plan,
-    releases: releasesForManifest,
-    workflows,
-  }))
+  const manifestInput = { config: input.config, content, contentDigest, plan: input.plan, releases: releasesForManifest, workflows }
+  const expectedManifest = serializeReleaseManifest(input.manifest.schemaVersion === 2
+    ? createPlatformReleaseManifest(manifestInput)
+    : createPlatformReleaseManifestV3(manifestInput))
   if (expectedManifest !== input.serializedManifest) {
     throw new Error('The approved manifest provenance does not exactly match the frozen plan, content, deployments, and releases.')
   }
@@ -186,7 +191,9 @@ async function validateImmutableManifestGap(
     digest: input.plan.digest,
     manifestDigest: input.manifest.manifestDigest,
     missingManifestRepository: input.confirmMissingManifestRepository,
-    missingPlatformPublishedAt: true,
+    ...(input.manifest.schemaVersion === 2
+      ? { missingPlatformPublishedAt: true as const }
+      : { platformPublishedAt: input.manifest.publishedAt }),
     mutableManifestRepository: input.confirmMutableManifestRepository,
     releases: Object.fromEntries(REPOSITORY_KEYS.map((key) => [key, {
       immutable: releasesForManifest[key].immutable,

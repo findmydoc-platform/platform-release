@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { computeReleaseContentDigest, renderRepositoryReleaseNotes } from '../../src/platform-release/content.js'
-import { createPlatformReleaseManifest, serializePlatformReleaseManifest } from '../../src/platform-release/manifest.js'
+import { createPlatformReleaseManifest, createPlatformReleaseManifestV3, serializePlatformReleaseManifest, serializeReleaseManifest } from '../../src/platform-release/manifest.js'
 import { computePlanDigest } from '../../src/platform-release/plan.js'
 import {
   inspectImmutableManifestGapRecovery,
@@ -41,15 +41,16 @@ function frozenPlan(): PlatformReleasePlan {
   const repository = (key: PlatformRepositoryKey) => {
     const configured = config.repositories[key]
     const number = key === 'dashboard' ? 20 : 10
-    const targetSha = `${key}-frozen-target`
+    const targetSha = (key === 'dashboard' ? 'd' : 'e').repeat(40)
+    const commitSha = (key === 'dashboard' ? 'a' : 'b').repeat(40)
     return {
       base: { kind: 'cutover' as const, sha: `${key}-base` },
       branch: configured.branch,
-      commits: [{ bump: 'minor' as const, message: `feat: frozen ${key}`, sha: `${key}-commit`, url: `https://github.com/${configured.repository}/commit/${key}-commit` }],
+      commits: [{ bump: 'minor' as const, message: `feat: frozen ${key}`, sha: commitSha, url: `https://github.com/${configured.repository}/commit/${commitSha}` }],
       deploymentWorkflow: configured.deploymentWorkflow,
       productionUrl: configured.productionUrl,
       pullRequests: [{
-        body: '', commitShas: [`${key}-commit`], issues: [], number, repository: configured.repository,
+        body: '', commitShas: [commitSha], issues: [], number, repository: configured.repository,
         title: `Frozen ${key} change`, url: `https://github.com/${configured.repository}/pull/${number}`, visuals: [],
       }],
       repository: configured.repository,
@@ -154,12 +155,46 @@ function fixture(): { github: RecoveryGitHub; input: ImmutableManifestGapRecover
   }
 }
 
+function fixtureV3(): { github: RecoveryGitHub; input: ImmutableManifestGapRecoveryInput } {
+  const plan = frozenPlan()
+  const content = approvedContent()
+  const releases = releaseDetails(plan, content)
+  const workflows = workflowRuns(plan)
+  const manifest = createPlatformReleaseManifestV3({
+    config, content, contentDigest: computeReleaseContentDigest(content), plan, releases, workflows,
+  })
+  const serializedManifest = serializeReleaseManifest(manifest)
+  const github = new RecoveryGitHub(plan, releases, workflows)
+  github.assets.set(config.repositories.website.repository, serializedManifest)
+  return {
+    github,
+    input: {
+      announce: false, config, confirmContentDigest: manifest.contentDigest, confirmDigest: plan.digest,
+      confirmManifestDigest: manifest.manifestDigest,
+      confirmMissingManifestRepository: config.repositories.dashboard.repository,
+      confirmMutableManifestRepository: config.repositories.website.repository,
+      confirmPlatformPublishedAt: manifest.publishedAt,
+      confirmVersion: plan.version, content, manifest, plan, serializedManifest,
+    },
+  }
+}
+
 describe('immutable release manifest-gap recovery', () => {
   it('preflights only the original frozen plan without discovering or mutating newer state', async () => {
     const { github, input } = fixture()
     await expect(inspectImmutableManifestGapRecovery(input, github)).resolves.toMatchObject({
       missingManifestRepository: config.repositories.dashboard.repository,
       status: 'ready', version: 'v0.46.0',
+    })
+    expect(github.mutatingCalls).toEqual([])
+  })
+
+  it('recovers the native Manifest v3 format emitted by current apply runs', async () => {
+    const { github, input } = fixtureV3()
+    await expect(inspectImmutableManifestGapRecovery(input, github)).resolves.toMatchObject({
+      platformPublishedAt: input.manifest.publishedAt,
+      status: 'ready',
+      version: input.manifest.version,
     })
     expect(github.mutatingCalls).toEqual([])
   })
@@ -199,7 +234,7 @@ describe('immutable release manifest-gap recovery', () => {
       serializedManifest: serializePlatformReleaseManifest(alteredManifest),
     }
     github.assets.set(config.repositories.website.repository, alteredInput.serializedManifest)
-    await expect(inspectImmutableManifestGapRecovery(alteredInput, github)).rejects.toThrow('deployment run does not match')
+    await expect(inspectImmutableManifestGapRecovery(alteredInput, github)).rejects.toThrow('deployment URL is untrusted')
   })
 
   it('ingests the exact manifest and sends one announcement without release or deployment mutations', async () => {
