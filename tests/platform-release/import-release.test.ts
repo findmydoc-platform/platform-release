@@ -36,7 +36,16 @@ function github(body = 'See https://github.com/findmydoc-platform/website/pull/4
     compareCommits: vi.fn(async () => commits),
     getAllCommits: vi.fn(async () => commits),
     getPublishedReleases: vi.fn(async () => [{ body, publishedAt: '2026-07-01T10:00:00.000Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.45.0', targetSha: 'a'.repeat(40), version: 'v0.45.0' }]),
-    getPullRequests: vi.fn(async () => [{ body: 'Contact person@example.com', commitShas: ['a'.repeat(40)], issues: [], number: 42, repository: 'findmydoc-platform/website', title: 'feat: release for person@example.com', url: 'https://github.com/findmydoc-platform/website/pull/42', visuals: [] }]),
+    getPullRequests: vi.fn(async () => [{
+      body: 'Contact person@example.com',
+      commitShas: ['a'.repeat(40)],
+      issues: [{ number: 41, repository: 'findmydoc-platform/website', title: 'Issue for person@example.com', url: 'https://github.com/findmydoc-platform/website/issues/41' }],
+      number: 42,
+      repository: 'findmydoc-platform/website',
+      title: 'feat: release for person@example.com',
+      url: 'https://github.com/findmydoc-platform/website/pull/42',
+      visuals: [{ altText: 'Preview person@example.com', formFactor: 'desktop', label: 'Email person@example.com', pullRequestNumber: 42, releaseEligible: true, repository: 'findmydoc-platform/website', source: 'body', url: 'https://example.com/preview.png' }],
+    }]),
   }
 }
 
@@ -74,13 +83,31 @@ describe('release import', () => {
     expect(valid.orphanCommits).toEqual(['b'.repeat(40)])
     expect(JSON.stringify(valid)).not.toMatch(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
     expect(valid.commits[0]?.message).toContain('[redacted-email]')
-    expect(valid.pullRequests[0]).toMatchObject({ body: 'Contact [redacted-email]', title: 'feat: release for [redacted-email]' })
+    expect(valid.pullRequests[0]).toMatchObject({
+      body: 'Contact [redacted-email]',
+      issues: [{ title: 'Issue for [redacted-email]' }],
+      title: 'feat: release for [redacted-email]',
+      visuals: [{ altText: 'Preview [redacted-email]', label: 'Email [redacted-email]' }],
+    })
     expect(validateReleaseImportPlan({ ...valid, createdAt: '2030-01-01T00:00:00.000Z' }, config).digest).toBe(valid.digest)
     expect(reuseReleaseImportPlan(valid, { ...valid, createdAt: '2030-01-01T00:00:00.000Z' }, config).createdAt).toBe(valid.createdAt)
 
     expect(() => validateReleaseImportPlan({ ...valid, releaseNotes: 'Contact person@example.com' }, config)).toThrow(
       'must not contain plain-text email addresses',
     )
+
+    const legacyPlan = {
+      ...valid,
+      commits: valid.commits.map((commit, index) => index === 0
+        ? { ...commit, message: 'feat: release\n\nCo-authored-by: Example Person <person@example.com>' }
+        : commit),
+      digest: '',
+    }
+    expect(reuseReleaseImportPlan(legacyPlan, valid, config)).toMatchObject({
+      createdAt: valid.createdAt,
+      digest: valid.digest,
+    })
+    expect(JSON.stringify(reuseReleaseImportPlan(legacyPlan, valid, config))).not.toContain('person@example.com')
 
     const discrepant = (await createReleaseImportPlans({ componentKey: 'website', config, versions: ['v0.45.0'] }, github('No pull request link')))[0]!
     expect(discrepant.reviewRequired).toEqual(['Tag range contains findmydoc-platform/website#42, but the release notes do not reference it.'])

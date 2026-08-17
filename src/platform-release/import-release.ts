@@ -21,8 +21,13 @@ const EMAIL_ADDRESS = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi
 const EMAIL_ADDRESS_PRESENT = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
 const KINDS = new Set<ReleaseContentKind>(['feature', 'fix', 'maintenance'])
 
-function redactEmailAddresses(value: string): string {
-  return value.replace(EMAIL_ADDRESS, '[redacted-email]')
+function redactEmailAddresses<T>(value: T): T {
+  if (typeof value === 'string') return value.replace(EMAIL_ADDRESS, '[redacted-email]') as T
+  if (Array.isArray(value)) return value.map(redactEmailAddresses) as T
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactEmailAddresses(entry)])) as T
+  }
+  return value
 }
 
 function containsEmailAddress(value: unknown): boolean {
@@ -80,32 +85,26 @@ export async function createReleaseImportPlans(input: {
     if (!release) throw new Error(`${component.repository} has no published regular release ${version}.`)
     const releaseIndex = releases.findIndex((candidate) => candidate.version === version)
     const previous = releaseIndex > 0 ? releases[releaseIndex - 1] : undefined
-    const sourceCommits = previous
+    const commits = previous
       ? await github.compareCommits(component.repository, previous.targetSha, release.targetSha)
       : await github.getAllCommits(component.repository, release.targetSha)
-    const commits = sourceCommits.map((commit) => ({ ...commit, message: redactEmailAddresses(commit.message) }))
     if (commits.length === 0) throw new Error(`${component.repository} ${version} has no commits in its release range.`)
-    const pullRequests = (await github.getPullRequests(component.repository, commits)).map((pullRequest) => ({
-      ...pullRequest,
-      body: redactEmailAddresses(pullRequest.body),
-      title: redactEmailAddresses(pullRequest.title),
-    }))
+    const pullRequests = await github.getPullRequests(component.repository, commits)
     const assignedCommitShas = new Set(pullRequests.flatMap((pullRequest) => pullRequest.commitShas))
     const orphanCommits = commits.filter((commit) => !assignedCommitShas.has(commit.sha)).map((commit) => commit.sha)
-    const releaseNotes = redactEmailAddresses(release.body)
-    const notesReferences = releaseNotesPullRequests(releaseNotes)
+    const notesReferences = releaseNotesPullRequests(release.body)
     const mappedReferences = new Set(pullRequests.map((pullRequest) => pullRequestKey(pullRequest.repository, pullRequest.number)))
     const reviewRequired = [
       ...[...notesReferences].filter((reference) => !mappedReferences.has(reference)).map((reference) => `Release notes reference ${reference}, but the tag range does not.`),
       ...[...mappedReferences].filter((reference) => !notesReferences.has(reference)).map((reference) => `Tag range contains ${reference}, but the release notes do not reference it.`),
-      ...(!releaseNotes.trim() ? ['GitHub release notes are empty.'] : []),
+      ...(!release.body.trim() ? ['GitHub release notes are empty.'] : []),
     ]
     const deploymentRun = input.deploymentRuns?.[version] ?? null
     if (deploymentRun !== null) {
       const url = new URL(deploymentRun)
       if (url.protocol !== 'https:' || url.hostname !== 'github.com') throw new Error(`Deployment run for ${version} must be a GitHub HTTPS URL.`)
     }
-    const planWithoutDigest: Omit<ReleaseImportPlan, 'digest'> = {
+    const planWithoutDigest = redactEmailAddresses<Omit<ReleaseImportPlan, 'digest'>>({
       commits,
       component: {
         displayName: component.displayName,
@@ -119,14 +118,15 @@ export async function createReleaseImportPlans(input: {
       previousVersion: previous?.version ?? null,
       publishedAt: release.publishedAt,
       pullRequests,
-      releaseNotes,
+      releaseNotes: release.body,
       releaseUrl: release.releaseUrl,
       reviewRequired,
       schemaVersion: 1,
       targetSha: release.targetSha,
       version,
-    }
-    plans.push({ ...planWithoutDigest, digest: importPlanDigest(planWithoutDigest) })
+    })
+    const plan = { ...planWithoutDigest, digest: importPlanDigest(planWithoutDigest) }
+    plans.push(validateReleaseImportPlan(plan, input.config))
   }
   return plans
 }
@@ -156,8 +156,12 @@ export function reuseReleaseImportPlan(
   candidate: ReleaseImportPlan,
   config: PlatformReleaseConfig,
 ): ReleaseImportPlan {
-  const validatedExisting = validateReleaseImportPlan(existing, config)
-  if (validatedExisting.digest !== candidate.digest) {
+  const existingObject = requireObject(existing, 'Existing release import plan') as unknown as ReleaseImportPlan
+  const redactedExisting = redactEmailAddresses(existingObject)
+  const normalizedExisting = { ...redactedExisting, digest: importPlanDigest(redactedExisting) }
+  const validatedExisting = validateReleaseImportPlan(normalizedExisting, config)
+  const validatedCandidate = validateReleaseImportPlan(candidate, config)
+  if (validatedExisting.digest !== validatedCandidate.digest) {
     throw new Error('Existing release import plan differs from the current durable GitHub state.')
   }
   return validatedExisting
