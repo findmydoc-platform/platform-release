@@ -17,7 +17,20 @@ import type {
 
 const CHANGE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const DIGEST = /^[a-f0-9]{64}$/
+const EMAIL_ADDRESS = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi
+const EMAIL_ADDRESS_PRESENT = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
 const KINDS = new Set<ReleaseContentKind>(['feature', 'fix', 'maintenance'])
+
+function redactEmailAddresses(value: string): string {
+  return value.replace(EMAIL_ADDRESS, '[redacted-email]')
+}
+
+function containsEmailAddress(value: unknown): boolean {
+  if (typeof value === 'string') return EMAIL_ADDRESS_PRESENT.test(value)
+  if (Array.isArray(value)) return value.some(containsEmailAddress)
+  if (value && typeof value === 'object') return Object.values(value).some(containsEmailAddress)
+  return false
+}
 
 function requireObject(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object.`)
@@ -67,19 +80,25 @@ export async function createReleaseImportPlans(input: {
     if (!release) throw new Error(`${component.repository} has no published regular release ${version}.`)
     const releaseIndex = releases.findIndex((candidate) => candidate.version === version)
     const previous = releaseIndex > 0 ? releases[releaseIndex - 1] : undefined
-    const commits = previous
+    const sourceCommits = previous
       ? await github.compareCommits(component.repository, previous.targetSha, release.targetSha)
       : await github.getAllCommits(component.repository, release.targetSha)
+    const commits = sourceCommits.map((commit) => ({ ...commit, message: redactEmailAddresses(commit.message) }))
     if (commits.length === 0) throw new Error(`${component.repository} ${version} has no commits in its release range.`)
-    const pullRequests = await github.getPullRequests(component.repository, commits)
+    const pullRequests = (await github.getPullRequests(component.repository, commits)).map((pullRequest) => ({
+      ...pullRequest,
+      body: redactEmailAddresses(pullRequest.body),
+      title: redactEmailAddresses(pullRequest.title),
+    }))
     const assignedCommitShas = new Set(pullRequests.flatMap((pullRequest) => pullRequest.commitShas))
     const orphanCommits = commits.filter((commit) => !assignedCommitShas.has(commit.sha)).map((commit) => commit.sha)
-    const notesReferences = releaseNotesPullRequests(release.body)
+    const releaseNotes = redactEmailAddresses(release.body)
+    const notesReferences = releaseNotesPullRequests(releaseNotes)
     const mappedReferences = new Set(pullRequests.map((pullRequest) => pullRequestKey(pullRequest.repository, pullRequest.number)))
     const reviewRequired = [
       ...[...notesReferences].filter((reference) => !mappedReferences.has(reference)).map((reference) => `Release notes reference ${reference}, but the tag range does not.`),
       ...[...mappedReferences].filter((reference) => !notesReferences.has(reference)).map((reference) => `Tag range contains ${reference}, but the release notes do not reference it.`),
-      ...(!release.body.trim() ? ['GitHub release notes are empty.'] : []),
+      ...(!releaseNotes.trim() ? ['GitHub release notes are empty.'] : []),
     ]
     const deploymentRun = input.deploymentRuns?.[version] ?? null
     if (deploymentRun !== null) {
@@ -100,7 +119,7 @@ export async function createReleaseImportPlans(input: {
       previousVersion: previous?.version ?? null,
       publishedAt: release.publishedAt,
       pullRequests,
-      releaseNotes: release.body,
+      releaseNotes,
       releaseUrl: release.releaseUrl,
       reviewRequired,
       schemaVersion: 1,
@@ -118,6 +137,7 @@ export function validateReleaseImportPlan(candidate: unknown, config?: PlatformR
   if (!plan.component || typeof plan.component.key !== 'string' || typeof plan.component.repository !== 'string' ||
     typeof plan.component.displayName !== 'string' || typeof plan.component.productionUrl !== 'string') throw new Error('Release import component is invalid.')
   if (!Array.isArray(plan.commits) || !Array.isArray(plan.pullRequests) || !Array.isArray(plan.orphanCommits) || !Array.isArray(plan.reviewRequired)) throw new Error('Release import provenance is incomplete.')
+  if (containsEmailAddress(plan)) throw new Error('Release import plans must not contain plain-text email addresses.')
   if (typeof plan.releaseUrl !== 'string' || typeof plan.targetSha !== 'string' || typeof plan.publishedAt !== 'string' || Number.isNaN(Date.parse(plan.publishedAt))) throw new Error('Release import publication metadata is invalid.')
   if (plan.deploymentRun !== null && typeof plan.deploymentRun !== 'string') throw new Error('Release import deployment evidence is invalid.')
   if (config) {
