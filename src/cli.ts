@@ -147,7 +147,12 @@ async function writeImportPlanImmutable(
 ): Promise<ReleaseImportPlan> {
   const absolutePath = resolve(path)
   try {
-    return reuseReleaseImportPlan(JSON.parse(await readFile(absolutePath, 'utf8')), plan, config)
+    const existing = JSON.parse(await readFile(absolutePath, 'utf8')) as unknown
+    const effectivePlan = reuseReleaseImportPlan(existing, plan, config)
+    if (canonicalArtifact(existing) !== canonicalArtifact(effectivePlan)) {
+      await writeFile(absolutePath, canonicalArtifact(effectivePlan), 'utf8')
+    }
+    return effectivePlan
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }

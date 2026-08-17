@@ -17,7 +17,25 @@ import type {
 
 const CHANGE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const DIGEST = /^[a-f0-9]{64}$/
+const EMAIL_ADDRESS = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi
+const EMAIL_ADDRESS_PRESENT = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
 const KINDS = new Set<ReleaseContentKind>(['feature', 'fix', 'maintenance'])
+
+function redactEmailAddresses<T>(value: T): T {
+  if (typeof value === 'string') return value.replace(EMAIL_ADDRESS, '[redacted-email]') as T
+  if (Array.isArray(value)) return value.map(redactEmailAddresses) as T
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactEmailAddresses(entry)])) as T
+  }
+  return value
+}
+
+function containsEmailAddress(value: unknown): boolean {
+  if (typeof value === 'string') return EMAIL_ADDRESS_PRESENT.test(value)
+  if (Array.isArray(value)) return value.some(containsEmailAddress)
+  if (value && typeof value === 'object') return Object.values(value).some(containsEmailAddress)
+  return false
+}
 
 function requireObject(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object.`)
@@ -86,7 +104,7 @@ export async function createReleaseImportPlans(input: {
       const url = new URL(deploymentRun)
       if (url.protocol !== 'https:' || url.hostname !== 'github.com') throw new Error(`Deployment run for ${version} must be a GitHub HTTPS URL.`)
     }
-    const planWithoutDigest: Omit<ReleaseImportPlan, 'digest'> = {
+    const planWithoutDigest = redactEmailAddresses<Omit<ReleaseImportPlan, 'digest'>>({
       commits,
       component: {
         displayName: component.displayName,
@@ -106,8 +124,9 @@ export async function createReleaseImportPlans(input: {
       schemaVersion: 1,
       targetSha: release.targetSha,
       version,
-    }
-    plans.push({ ...planWithoutDigest, digest: importPlanDigest(planWithoutDigest) })
+    })
+    const plan = { ...planWithoutDigest, digest: importPlanDigest(planWithoutDigest) }
+    plans.push(validateReleaseImportPlan(plan, input.config))
   }
   return plans
 }
@@ -118,6 +137,7 @@ export function validateReleaseImportPlan(candidate: unknown, config?: PlatformR
   if (!plan.component || typeof plan.component.key !== 'string' || typeof plan.component.repository !== 'string' ||
     typeof plan.component.displayName !== 'string' || typeof plan.component.productionUrl !== 'string') throw new Error('Release import component is invalid.')
   if (!Array.isArray(plan.commits) || !Array.isArray(plan.pullRequests) || !Array.isArray(plan.orphanCommits) || !Array.isArray(plan.reviewRequired)) throw new Error('Release import provenance is incomplete.')
+  if (containsEmailAddress(plan)) throw new Error('Release import plans must not contain plain-text email addresses.')
   if (typeof plan.releaseUrl !== 'string' || typeof plan.targetSha !== 'string' || typeof plan.publishedAt !== 'string' || Number.isNaN(Date.parse(plan.publishedAt))) throw new Error('Release import publication metadata is invalid.')
   if (plan.deploymentRun !== null && typeof plan.deploymentRun !== 'string') throw new Error('Release import deployment evidence is invalid.')
   if (config) {
@@ -136,8 +156,12 @@ export function reuseReleaseImportPlan(
   candidate: ReleaseImportPlan,
   config: PlatformReleaseConfig,
 ): ReleaseImportPlan {
-  const validatedExisting = validateReleaseImportPlan(existing, config)
-  if (validatedExisting.digest !== candidate.digest) {
+  const existingObject = requireObject(existing, 'Existing release import plan') as unknown as ReleaseImportPlan
+  const redactedExisting = redactEmailAddresses(existingObject)
+  const normalizedExisting = { ...redactedExisting, digest: importPlanDigest(redactedExisting) }
+  const validatedExisting = validateReleaseImportPlan(normalizedExisting, config)
+  const validatedCandidate = validateReleaseImportPlan(candidate, config)
+  if (validatedExisting.digest !== validatedCandidate.digest) {
     throw new Error('Existing release import plan differs from the current durable GitHub state.')
   }
   return validatedExisting
