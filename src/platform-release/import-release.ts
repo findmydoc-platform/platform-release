@@ -64,12 +64,12 @@ function boundManifestText(value: string, maximum: number): string {
 function validateReleaseImportManifestText(manifest: PlatformReleaseManifestV3): void {
   for (const component of manifest.components) {
     for (const commit of component.commits) {
-      if (commit.message.length > 1_000) throw new Error(`Commit message exceeds 1000 characters in ${manifest.version}.`)
+      if (typeof commit.message !== 'string' || commit.message.length > 1_000) throw new Error(`Commit message is invalid in ${manifest.version}.`)
     }
     for (const pullRequest of component.pullRequests) {
-      if (pullRequest.title.length > 500) throw new Error(`Pull request title exceeds 500 characters in ${manifest.version}.`)
+      if (typeof pullRequest.title !== 'string' || pullRequest.title.length > 500) throw new Error(`Pull request title is invalid in ${manifest.version}.`)
       for (const issue of pullRequest.issues) {
-        if (issue.title.length > 500) throw new Error(`Issue title exceeds 500 characters in ${manifest.version}.`)
+        if (typeof issue.title !== 'string' || issue.title.length > 500) throw new Error(`Issue title is invalid in ${manifest.version}.`)
       }
     }
   }

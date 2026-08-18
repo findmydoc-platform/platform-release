@@ -202,5 +202,28 @@ describe('release import', () => {
     await expect(ingestReleaseImportBatch({ apply: true, batchPath, config, confirmBatchDigest: batch.digest }, { ingestManifest }))
       .rejects.toThrow()
     expect(ingestManifest).not.toHaveBeenCalled()
+
+    const { manifestDigest: _secondManifestDigest, ...invalidTitleWithoutDigest } = {
+      ...manifest,
+      components: manifest.components.map((component) => ({
+        ...component,
+        pullRequests: component.pullRequests.map((pullRequest, index) => index === 0 ? { ...pullRequest, title: 42 } : pullRequest),
+      })),
+      version: invalidVersion,
+    }
+    const invalidTitleManifest = {
+      ...invalidTitleWithoutDigest,
+      manifestDigest: sha256(canonicalJson(invalidTitleWithoutDigest)),
+    }
+    await writeFile(join(invalidDirectory, 'platform-release.json'), canonicalJson(invalidTitleManifest), 'utf8')
+    const invalidTitleBatch = createReleaseImportBatch([
+      { manifestDigest: manifest.manifestDigest, manifestPath: `${manifest.version}/platform-release.json`, version: manifest.version },
+      { manifestDigest: invalidTitleManifest.manifestDigest, manifestPath: `${invalidVersion}/platform-release.json`, version: invalidVersion },
+    ])
+    await writeFile(batchPath, `${JSON.stringify(invalidTitleBatch, null, 2)}\n`, 'utf8')
+
+    await expect(ingestReleaseImportBatch({ apply: true, batchPath, config, confirmBatchDigest: invalidTitleBatch.digest }, { ingestManifest }))
+      .rejects.toThrow()
+    expect(ingestManifest).not.toHaveBeenCalled()
   })
 })
