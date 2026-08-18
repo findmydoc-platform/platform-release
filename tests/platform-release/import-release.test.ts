@@ -35,7 +35,7 @@ function github(body = 'See https://github.com/findmydoc-platform/website/pull/4
   return {
     compareCommits: vi.fn(async () => commits),
     getAllCommits: vi.fn(async () => commits),
-    getPublishedReleases: vi.fn(async () => [{ body, publishedAt: '2026-07-01T10:00:00.000Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.45.0', targetSha: 'a'.repeat(40), version: 'v0.45.0' }]),
+    getPublishedReleases: vi.fn(async () => [{ body, publishedAt: '2026-07-01T10:00:00Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.45.0', targetSha: 'a'.repeat(40), version: 'v0.45.0' }]),
     getPullRequests: vi.fn(async () => [{
       body: 'Contact person@example.com',
       commitShas: ['a'.repeat(40)],
@@ -123,6 +123,7 @@ describe('release import', () => {
 
     const manifest = buildReleaseImportManifest(releasePlan, approvedContent, config)
     expect(manifest).toMatchObject({ notificationMode: 'silent', releaseMode: 'application', schemaVersion: 3, source: { kind: 'github-release-import' } })
+    expect(manifest.publishedAt).toBe('2026-07-01T10:00:00Z')
     expect(manifest.components).toHaveLength(1)
     expect(manifest.components[0]?.deploymentRun).toBeNull()
     expect(serializeReleaseImportManifest(manifest)).toContain('"schemaVersion": 3')

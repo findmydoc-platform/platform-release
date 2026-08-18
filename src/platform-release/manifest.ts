@@ -30,7 +30,11 @@ function isExactGitHubUrl(value: unknown, pathname: string): boolean {
 }
 
 function isExactIsoTimestamp(value: unknown): value is string {
-  return typeof value === 'string' && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return false
+  const normalized = new Date(value)
+  if (Number.isNaN(normalized.getTime())) return false
+  const milliseconds = normalized.toISOString()
+  return milliseconds === value || milliseconds.replace('.000Z', 'Z') === value
 }
 
 export function createPlatformReleaseManifest(input: {
