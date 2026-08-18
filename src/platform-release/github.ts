@@ -51,6 +51,19 @@ type GitHubPullRequest = {
   title: string
 }
 
+type GitHubCommitFile = {
+  filename: string
+  previous_filename?: string
+  sha: string
+  status: string
+}
+
+type GitHubCommitEvidence = {
+  complete: boolean
+  files: GitHubCommitFile[]
+  message: string
+}
+
 type GitHubDeployment = {
   id: number
   payload?: unknown
@@ -64,6 +77,8 @@ type GitHubApiOptions = { method?: string; body?: unknown }
 type GitHubApiRequest = <T>(path: string, options?: GitHubApiOptions) => Promise<T>
 
 const WORKFLOW_RUNS_PAGE_SIZE = 100
+const MAX_COMMIT_FILES = 3_000
+const COMMIT_FILES_PAGE_SIZE = 100
 const PLATFORM_PUBLISHED_AT_MARKER = /<!--\s*findmydoc-platform-published-at:([^\s>]+)\s*-->/
 
 function platformPublishedAt(body: string | null | undefined): string | undefined {
@@ -144,13 +159,43 @@ export function assertLinearReleaseComparison(
 export function verifiedSquashMergePullRequestNumber(
   commit: Pick<ReleaseCommit, 'message' | 'sha'>,
   pullRequest: Pick<GitHubPullRequest, 'merge_commit_sha' | 'merged_at' | 'number'>,
+  hasEquivalentFiles = false,
+  mergeCommitMessage?: string,
 ): number | undefined {
   const subject = commit.message.split('\n', 1)[0]?.trim() ?? ''
-  const match = subject.match(/\(#([1-9]\d*)\)$/)
-  if (!match || Number(match[1]) !== pullRequest.number || !pullRequest.merged_at || pullRequest.merge_commit_sha !== commit.sha) {
+  const referencedNumber = Number(subject.match(/\(#([1-9]\d*)\)$/)?.[1])
+  const mergeSubject = mergeCommitMessage?.split('\n', 1)[0]?.trim()
+  if (referencedNumber !== pullRequest.number || !pullRequest.merged_at ||
+    (pullRequest.merge_commit_sha !== commit.sha && (!hasEquivalentFiles || mergeSubject !== subject))) {
     return undefined
   }
   return pullRequest.number
+}
+
+export function haveEquivalentCommitFiles(left: GitHubCommitFile[], right: GitHubCommitFile[]): boolean {
+  const normalize = (files: GitHubCommitFile[]) => files.map((file) => ({
+    filename: file.filename,
+    previous_filename: file.previous_filename ?? null,
+    sha: file.sha,
+    status: file.status,
+  })).sort((first, second) => JSON.stringify(first).localeCompare(JSON.stringify(second)))
+  return left.length > 0 && JSON.stringify(normalize(left)) === JSON.stringify(normalize(right))
+}
+
+export async function collectCommitEvidence(
+  fetchPage: (page: number, perPage: number) => Promise<{ commit: { message: string }; files?: GitHubCommitFile[] }>,
+): Promise<GitHubCommitEvidence> {
+  const files: GitHubCommitFile[] = []
+  let message: string | undefined
+  const maximumPages = MAX_COMMIT_FILES / COMMIT_FILES_PAGE_SIZE
+  for (let page = 1; page <= maximumPages; page += 1) {
+    const response = await fetchPage(page, COMMIT_FILES_PAGE_SIZE)
+    message ??= response.commit.message
+    const pageFiles = response.files ?? []
+    files.push(...pageFiles)
+    if (pageFiles.length < COMMIT_FILES_PAGE_SIZE) return { complete: true, files, message }
+  }
+  return { complete: false, files, message: message ?? '' }
 }
 
 async function runGh(args: string[], input?: string, environment: NodeJS.ProcessEnv = process.env): Promise<string> {
@@ -204,6 +249,12 @@ async function resolveTagSha(repository: string, tag: string): Promise<string> {
   }
   if (object.type !== 'commit') throw new Error(`${repository} ${tag} does not resolve to a commit.`)
   return object.sha
+}
+
+async function commitEvidence(repository: string, sha: string): Promise<GitHubCommitEvidence> {
+  return collectCommitEvidence(async (page, perPage) => api<{ commit: { message: string }; files?: GitHubCommitFile[] }>(
+    `repos/${repository}/commits/${sha}?per_page=${perPage}&page=${page}`,
+  ))
 }
 
 function releaseUrl(repository: string, version: string): string {
@@ -310,11 +361,20 @@ export async function discoverReleasePullRequests(input: {
   commits: ReleaseCommit[]
   getAssociatedPullRequestNumbers: (commit: ReleaseCommit) => Promise<number[]>
   getClosingIssues: (number: number) => Promise<ReleaseIssue[]>
+  getCommitEvidence: (sha: string) => Promise<GitHubCommitEvidence>
   getPullRequest: (number: number) => Promise<GitHubPullRequest | undefined>
   repository: string
 }): Promise<ReleasePullRequest[]> {
   const commitsByPullRequest = new Map<number, Set<string>>()
+  const commitEvidenceBySha = new Map<string, Promise<GitHubCommitEvidence>>()
   const pullRequestDetails = new Map<number, GitHubPullRequest>()
+  const evidenceFor = (sha: string) => {
+    const existing = commitEvidenceBySha.get(sha)
+    if (existing) return existing
+    const pending = input.getCommitEvidence(sha)
+    commitEvidenceBySha.set(sha, pending)
+    return pending
+  }
   for (const commit of input.commits) {
     const pullRequestNumbers = await input.getAssociatedPullRequestNumbers(commit)
     if (pullRequestNumbers.length === 0) {
@@ -323,7 +383,18 @@ export async function discoverReleasePullRequests(input: {
       if (Number.isSafeInteger(candidateNumber)) {
         const candidate = await input.getPullRequest(candidateNumber)
         if (candidate) {
-          const verifiedNumber = verifiedSquashMergePullRequestNumber(commit, candidate)
+          let hasEquivalentFiles = false
+          let mergeCommitMessage: string | undefined
+          if (candidate.merged_at && candidate.merge_commit_sha && candidate.merge_commit_sha !== commit.sha) {
+            const [releasedEvidence, mergeEvidence] = await Promise.all([
+              evidenceFor(commit.sha),
+              evidenceFor(candidate.merge_commit_sha),
+            ])
+            mergeCommitMessage = mergeEvidence.message
+            hasEquivalentFiles = releasedEvidence.complete && mergeEvidence.complete &&
+              haveEquivalentCommitFiles(releasedEvidence.files, mergeEvidence.files)
+          }
+          const verifiedNumber = verifiedSquashMergePullRequestNumber(commit, candidate, hasEquivalentFiles, mergeCommitMessage)
           if (verifiedNumber !== undefined) {
             pullRequestNumbers.push(verifiedNumber)
             pullRequestDetails.set(verifiedNumber, candidate)
@@ -451,6 +522,7 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
         `repos/${repository}/commits/${commit.sha}/pulls`,
       )).map((pull) => pull.number),
       getClosingIssues: async (number) => closingIssues(repository, number),
+      getCommitEvidence: async (sha) => commitEvidence(repository, sha),
       getPullRequest: async (number) => optionalApi<GitHubPullRequest>(`repos/${repository}/pulls/${number}`),
       repository,
     })
