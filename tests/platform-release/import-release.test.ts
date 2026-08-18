@@ -44,12 +44,12 @@ function github(body = 'See https://github.com/findmydoc-platform/website/pull/4
     getAllCommits: vi.fn(async () => commits),
     getPublishedReleases: vi.fn(async () => [{ body, publishedAt: '2026-07-01T10:00:00Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.45.0', targetSha: 'a'.repeat(40), version: 'v0.45.0' }]),
     getPullRequests: vi.fn(async () => [{
-      body: 'Contact person@example.com',
+      body: 'Contact person@example.com from /Users/example/private/repo, /home/example/repo, /root/repo, C:\\Users\\example\\repo, C:/Users/example/repo, file:///Users/example/repo, http://localhost:3107/private, http://localhost./private, ws://localhost:3107/private, http://127.1:3107/private, http://127.0.0.2/private, http://[::ffff:127.0.0.1]/private, and http://[0:0:0:0:0:0:0:1]/private; preserve https://example.com/home/dashboard, https://example.com/Users/list, https://example.com/?next=/home/dashboard, and literal \uE0000\uE001',
       commitShas: ['a'.repeat(40)],
       issues: [{ number: 41, repository: 'findmydoc-platform/website', title: `Issue for person@example.com ${'i'.repeat(500)}`, url: 'https://github.com/findmydoc-platform/website/issues/41' }],
       number: 42,
       repository: 'findmydoc-platform/website',
-      title: `feat: release for person@example.com ${'p'.repeat(500)}`,
+      title: `feat: release for dependabot[bot]@users.noreply.github.com ${'p'.repeat(500)}`,
       url: 'https://github.com/findmydoc-platform/website/pull/42',
       visuals: [{ altText: 'Preview person@example.com', formFactor: 'desktop', label: 'Email person@example.com', pullRequestNumber: 42, releaseEligible: true, repository: 'findmydoc-platform/website', source: 'body', url: 'https://example.com/preview.png' }],
     }]),
@@ -187,7 +187,7 @@ describe('release import', () => {
     expect(JSON.stringify(valid)).not.toMatch(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
     expect(valid.commits[0]?.message).toContain('[redacted-email]')
     expect(valid.pullRequests[0]).toMatchObject({
-      body: 'Contact [redacted-email]',
+      body: 'Contact [redacted-email] from [redacted-local-path], [redacted-local-path], [redacted-local-path], [redacted-local-path], [redacted-local-path], [redacted-local-url] [redacted-local-url] [redacted-local-url] [redacted-local-url] [redacted-local-url] [redacted-local-url] [redacted-local-url] and [redacted-local-url] preserve https://example.com/home/dashboard, https://example.com/Users/list, https://example.com/?next=/home/dashboard, and literal \uE0000\uE001',
       issues: [{ title: expect.stringContaining('Issue for [redacted-email]') }],
       title: expect.stringContaining('feat: release for [redacted-email]'),
       visuals: [{ altText: 'Preview [redacted-email]', label: 'Email [redacted-email]' }],
@@ -196,7 +196,13 @@ describe('release import', () => {
     expect(reuseReleaseImportPlan(valid, { ...valid, createdAt: '2030-01-01T00:00:00.000Z' }, config).createdAt).toBe(valid.createdAt)
 
     expect(() => validateReleaseImportPlan({ ...valid, releaseNotes: 'Contact person@example.com' }, config)).toThrow(
-      'must not contain plain-text email addresses',
+      'must not contain private local data or plain-text email addresses',
+    )
+    expect(() => validateReleaseImportPlan({ ...valid, releaseNotes: '/Users/example/private/repo' }, config)).toThrow(
+      'must not contain private local data or plain-text email addresses',
+    )
+    expect(() => validateReleaseImportPlan({ ...valid, releaseNotes: 'http://127.0.0.1:3107/private' }, config)).toThrow(
+      'must not contain private local data or plain-text email addresses',
     )
 
     const legacyPlan = {
