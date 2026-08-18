@@ -16,7 +16,7 @@ import {
   validateReleaseImportManifestFilename,
   validateReleaseImportPlan,
 } from '../../src/platform-release/import-release.js'
-import { discoverReleasePullRequests, verifiedSquashMergePullRequestNumber } from '../../src/platform-release/github.js'
+import { collectCommitEvidence, discoverReleasePullRequests, haveEquivalentCommitFiles, verifiedSquashMergePullRequestNumber } from '../../src/platform-release/github.js'
 import type { PlatformReleaseConfig, ReleaseContentV3, ReleaseImportGitHubClient } from '../../src/platform-release/types.js'
 
 const config: PlatformReleaseConfig = {
@@ -81,13 +81,43 @@ function content(): ReleaseContentV3 {
 describe('release import', () => {
   it('recovers only an exact verified squash-merge pull request reference', () => {
     const commit = { message: 'feat: historical release change (#123)\n\nDetails', sha: 'a'.repeat(40) }
-    const pullRequest = { merge_commit_sha: commit.sha, merged_at: '2025-01-01T00:00:00Z', number: 123 }
+    const pullRequest = { merge_commit_sha: commit.sha, merged_at: '2025-01-01T00:00:00Z', number: 123, title: 'feat: historical release change' }
 
     expect(verifiedSquashMergePullRequestNumber(commit, pullRequest)).toBe(123)
     expect(verifiedSquashMergePullRequestNumber(commit, { ...pullRequest, merge_commit_sha: 'b'.repeat(40) })).toBeUndefined()
+    expect(verifiedSquashMergePullRequestNumber(commit, { ...pullRequest, merge_commit_sha: 'b'.repeat(40) }, true, commit.message)).toBe(123)
+    expect(verifiedSquashMergePullRequestNumber(commit, { ...pullRequest, merge_commit_sha: 'b'.repeat(40) }, true, 'feat: changed title (#123)')).toBeUndefined()
     expect(verifiedSquashMergePullRequestNumber(commit, { ...pullRequest, merged_at: null })).toBeUndefined()
     expect(verifiedSquashMergePullRequestNumber(commit, { ...pullRequest, number: 124 })).toBeUndefined()
     expect(verifiedSquashMergePullRequestNumber({ ...commit, message: 'feat: untrusted reference #123' }, pullRequest)).toBeUndefined()
+    expect(verifiedSquashMergePullRequestNumber(commit, { ...pullRequest, title: 'mutable current title' })).toBe(123)
+
+    const files = [{ filename: 'src/example.ts', sha: 'c'.repeat(40), status: 'modified' }]
+    expect(haveEquivalentCommitFiles(files, [...files])).toBe(true)
+    expect(haveEquivalentCommitFiles(files, [{ ...files[0]!, sha: 'd'.repeat(40) }])).toBe(false)
+    expect(haveEquivalentCommitFiles([], [])).toBe(false)
+  })
+
+  it('collects complete paginated commit evidence and fails closed at the GitHub file limit', async () => {
+    const file = (index: number) => ({ filename: `src/${index}.ts`, sha: index.toString().padStart(40, '0'), status: 'modified' })
+    const completeFetch = vi.fn(async (page: number) => ({
+      commit: { message: 'feat: release (#123)' },
+      files: page === 1 ? Array.from({ length: 100 }, (_, index) => file(index)) : [file(100)],
+    }))
+    const complete = await collectCommitEvidence(completeFetch)
+    expect(complete).toMatchObject({ complete: true, message: 'feat: release (#123)' })
+    expect(complete.files).toHaveLength(101)
+    expect(completeFetch).toHaveBeenNthCalledWith(1, 1, 100)
+    expect(completeFetch).toHaveBeenNthCalledWith(2, 2, 100)
+
+    const limitedFetch = vi.fn(async (page: number) => ({
+      commit: { message: 'feat: release (#123)' },
+      files: Array.from({ length: 100 }, (_, index) => file(((page - 1) * 100) + index)),
+    }))
+    const limited = await collectCommitEvidence(limitedFetch)
+    expect(limited).toMatchObject({ complete: false })
+    expect(limited.files).toHaveLength(3_000)
+    expect(limitedFetch).toHaveBeenCalledTimes(30)
   })
 
   it('recovers a verified squash merge through the complete discovery path', async () => {
@@ -95,21 +125,29 @@ describe('release import', () => {
     const getPullRequest = vi.fn(async () => ({
       body: '## What changed\n\nHistorical change.',
       html_url: 'https://github.com/org/repo/pull/123',
-      merge_commit_sha: commit.sha,
+      merge_commit_sha: 'b'.repeat(40),
       merged_at: '2025-01-01T00:00:00Z',
       number: 123,
       title: 'feat: historical release change',
+    }))
+    const getCommitEvidence = vi.fn(async (sha: string) => ({
+      complete: true,
+      files: [{ filename: 'src/example.ts', sha: 'c'.repeat(40), status: 'modified' }],
+      message: `feat: historical release change (#123)\n\n${sha}`,
     }))
     const result = await discoverReleasePullRequests({
       commits: [commit],
       getAssociatedPullRequestNumbers: vi.fn(async () => []),
       getClosingIssues: vi.fn(async () => []),
+      getCommitEvidence,
       getPullRequest,
       repository: 'org/repo',
     })
 
     expect(result).toMatchObject([{ commitShas: [commit.sha], number: 123, repository: 'org/repo' }])
     expect(getPullRequest).toHaveBeenCalledTimes(1)
+    expect(result[0]?.number).toBe(123)
+    expect(getCommitEvidence.mock.calls.map(([sha]) => sha)).toEqual([commit.sha, 'b'.repeat(40)])
   })
 
   it('keeps an unavailable squash reference orphaned and propagates other lookup errors', async () => {
@@ -118,6 +156,7 @@ describe('release import', () => {
       commits: [commit],
       getAssociatedPullRequestNumbers: vi.fn(async () => []),
       getClosingIssues: vi.fn(async () => []),
+      getCommitEvidence: vi.fn(async () => ({ complete: true, files: [], message: commit.message })),
       repository: 'org/repo',
     }
 
