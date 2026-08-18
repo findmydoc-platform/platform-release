@@ -248,10 +248,14 @@ export type ReleaseImportPlan = {
   previousVersion: string | null
   publishedAt: string
   pullRequests: ReleasePullRequest[]
+  range?: {
+    kind: 'commits' | 'identical' | 'initial'
+    previousTargetSha: string | null
+  }
   releaseNotes: string
   releaseUrl: string
   reviewRequired: string[]
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   targetSha: string
   commits: ReleaseCommit[]
   version: string

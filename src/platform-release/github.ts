@@ -151,7 +151,7 @@ export function assertLinearReleaseComparison(
   base: string,
   comparison: { merge_base_commit: { sha: string }; status: string },
 ): void {
-  if (comparison.status !== 'ahead' || comparison.merge_base_commit.sha !== base) {
+  if (!['ahead', 'identical'].includes(comparison.status) || comparison.merge_base_commit.sha !== base) {
     throw new Error(`${repository} release tags are not a linear ancestor range (${comparison.status}).`)
   }
 }

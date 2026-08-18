@@ -63,6 +63,9 @@ describe('GitHub release manifest resume', () => {
     expect(() => assertLinearReleaseComparison('org/repo', 'a'.repeat(40), {
       merge_base_commit: { sha: 'a'.repeat(40) }, status: 'ahead',
     })).not.toThrow()
+    expect(() => assertLinearReleaseComparison('org/repo', 'a'.repeat(40), {
+      merge_base_commit: { sha: 'a'.repeat(40) }, status: 'identical',
+    })).not.toThrow()
   })
 
   it('finds an existing deployment run beyond the first workflow-runs page', async () => {
