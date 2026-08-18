@@ -497,22 +497,41 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   }
 
   async compareCommits(repository: string, base: string, head: string): Promise<ReleaseCommit[]> {
+    const comparison = await this.compareReleaseCommits(repository, base, head)
+    assertLinearReleaseComparison(repository, base, {
+      merge_base_commit: { sha: comparison.mergeBaseSha },
+      status: comparison.status,
+    })
+    return comparison.commits
+  }
+
+  async compareReleaseCommits(repository: string, base: string, head: string): Promise<{
+    commits: ReleaseCommit[]
+    mergeBaseSha: string
+    status: 'ahead' | 'diverged' | 'identical'
+  }> {
     const comparison = await api<{
       commits: Array<{ commit: { message: string }; html_url: string; sha: string }>
       merge_base_commit: { sha: string }
       status: string
       total_commits: number
     }>(`repos/${repository}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`)
-    assertLinearReleaseComparison(repository, base, comparison)
+    if (!['ahead', 'diverged', 'identical'].includes(comparison.status)) {
+      throw new Error(`${repository} release tags have unsupported comparison status ${comparison.status}.`)
+    }
     if (comparison.total_commits > comparison.commits.length) {
       throw new Error(`${repository} has ${comparison.total_commits} commits in the release range, exceeding the GitHub comparison response.`)
     }
-    return comparison.commits.map((commit) => ({
-      bump: bumpForMessage(commit.commit.message),
-      message: commit.commit.message,
-      sha: commit.sha,
-      url: commit.html_url,
-    }))
+    return {
+      commits: comparison.commits.map((commit) => ({
+        bump: bumpForMessage(commit.commit.message),
+        message: commit.commit.message,
+        sha: commit.sha,
+        url: commit.html_url,
+      })),
+      mergeBaseSha: comparison.merge_base_commit.sha,
+      status: comparison.status as 'ahead' | 'diverged' | 'identical',
+    }
   }
 
   async getPullRequests(repository: string, commits: ReleaseCommit[]): Promise<ReleasePullRequest[]> {

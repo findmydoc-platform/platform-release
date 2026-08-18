@@ -40,7 +40,7 @@ const commits = [
 
 function github(body = 'See https://github.com/findmydoc-platform/website/pull/42'): ReleaseImportGitHubClient {
   return {
-    compareCommits: vi.fn(async () => commits),
+    compareReleaseCommits: vi.fn(async () => ({ commits, mergeBaseSha: 'c'.repeat(40), status: 'ahead' })),
     getAllCommits: vi.fn(async () => commits),
     getPublishedReleases: vi.fn(async () => [{ body, publishedAt: '2026-07-01T10:00:00Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.45.0', targetSha: 'a'.repeat(40), version: 'v0.45.0' }]),
     getPullRequests: vi.fn(async () => [{
@@ -226,7 +226,7 @@ describe('release import', () => {
     const targetSha = 'c'.repeat(40)
     const notes = 'See https://github.com/findmydoc-platform/website/pull/236'
     const identicalGithub: ReleaseImportGitHubClient = {
-      compareCommits: vi.fn(async () => []),
+      compareReleaseCommits: vi.fn(async () => ({ commits: [], mergeBaseSha: targetSha, status: 'identical' })),
       getAllCommits: vi.fn(async () => []),
       getPublishedReleases: vi.fn(async () => [
         { body: notes, publishedAt: '2025-07-04T14:57:53Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.7.5', targetSha, version: 'v0.7.5' },
@@ -271,6 +271,35 @@ describe('release import', () => {
     invalidPlan.digest = sha256(canonicalJson((({ createdAt: _createdAt, digest: _ignored, ...durable }) => durable)(invalidPlan)))
     expect(() => validateReleaseImportPlan(invalidPlan, config)).toThrow('Commit release import range is invalid')
     expect(() => validateReleaseImportContent(invalidPlan, approvedContent)).toThrow('Commit release import range is invalid')
+  })
+
+  it('binds a diverged historical release range and its acknowledgement into the plan', async () => {
+    const baseSha = 'c'.repeat(40)
+    const targetSha = 'd'.repeat(40)
+    const mergeBaseSha = 'e'.repeat(40)
+    const divergedGithub: ReleaseImportGitHubClient = {
+      compareReleaseCommits: vi.fn(async () => ({ commits, mergeBaseSha, status: 'diverged' })),
+      getAllCommits: vi.fn(async () => []),
+      getPublishedReleases: vi.fn(async () => [
+        { body: '', publishedAt: '2025-06-26T21:23:37Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.6.1', targetSha: baseSha, version: 'v0.6.1' },
+        { body: 'See https://github.com/findmydoc-platform/website/pull/42', publishedAt: '2025-07-04T05:37:31Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.7.0', targetSha, version: 'v0.7.0' },
+      ]),
+      getPullRequests: github().getPullRequests,
+    }
+    const releasePlan = (await createReleaseImportPlans(
+      { componentKey: 'website', config, versions: ['v0.7.0'] },
+      divergedGithub,
+    ))[0]!
+
+    expect(releasePlan.range).toEqual({ kind: 'diverged', mergeBaseSha, previousTargetSha: baseSha })
+    expect(releasePlan.reviewRequired).toContain(
+      `Release tag v0.7.0 diverges from previous release v0.6.1 at merge base ${mergeBaseSha}; the plan contains only commits unique to v0.7.0.`,
+    )
+    expect(() => validateReleaseImportContent(releasePlan, content())).toThrow('acknowledge every exact plan review finding')
+    expect(validateReleaseImportContent(releasePlan, {
+      ...content(),
+      reviewAcknowledgements: [...releasePlan.reviewRequired],
+    }).reviewAcknowledgements).toEqual(releasePlan.reviewRequired)
   })
 
   it('requires complete PR and orphan-commit attribution and creates a silent application manifest', async () => {
