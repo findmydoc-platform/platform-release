@@ -17,24 +17,58 @@ import type {
 
 const CHANGE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const DIGEST = /^[a-f0-9]{64}$/
-const EMAIL_ADDRESS = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi
-const EMAIL_ADDRESS_PRESENT = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+const EMAIL_ADDRESS = /[A-Z0-9._%+\-[\]]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi
+const LOCAL_PATH = /(^|[\s"'`([{=:])((?:\/(?:Users|home)\/[^\s"'`<>,;]+|\/root(?:\/[^\s"'`<>,;]+)*|[A-Z]:[\\/]+Users[\\/]+[^\s"'`<>,;]+))/gim
+const URL_TOKEN = /(?:https?|wss?|file):\/\/[^\s"'`<>]+/gi
 const IMPORT_MANIFEST_FILENAME = /^platform-release(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?\.json$/
 const KINDS = new Set<ReleaseContentKind>(['feature', 'fix', 'maintenance'])
 
-function redactEmailAddresses<T>(value: T): T {
-  if (typeof value === 'string') return value.replace(EMAIL_ADDRESS, '[redacted-email]') as T
-  if (Array.isArray(value)) return value.map(redactEmailAddresses) as T
+function redactPrivateText(value: string): string {
+  const publicUrls: string[] = []
+  let publicUrlTokenPrefix = '\uE000'
+  while (value.includes(publicUrlTokenPrefix)) publicUrlTokenPrefix += '\uE000'
+  const withProtectedUrls = value
+    .replace(EMAIL_ADDRESS, '[redacted-email]')
+    .replace(URL_TOKEN, (candidate) => {
+      try {
+        const url = new URL(candidate)
+        const hostname = url.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '').toLowerCase()
+        const loopbackIpv4 = hostname.split('.').length === 4 && hostname.split('.').every((part) => /^\d+$/.test(part)) && Number(hostname.split('.')[0]) === 127
+        const mappedIpv4 = hostname.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+        const loopbackMappedIpv4 = mappedIpv4
+          ? ((Number.parseInt(mappedIpv4[1]!, 16) * 0x10000 + Number.parseInt(mappedIpv4[2]!, 16)) >>> 24) === 127
+          : false
+        if (url.protocol === 'file:' || hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '::1' || loopbackIpv4 || loopbackMappedIpv4) {
+          return '[redacted-local-url]'
+        }
+        const token = `${publicUrlTokenPrefix}${publicUrls.length}\uE001`
+        publicUrls.push(candidate)
+        return token
+      } catch {
+        return candidate
+      }
+    })
+  let redacted = withProtectedUrls
+    .replace(LOCAL_PATH, (_match, prefix: string) => `${prefix}[redacted-local-path]`)
+  for (const [index, publicUrl] of publicUrls.entries()) {
+    redacted = redacted.split(`${publicUrlTokenPrefix}${index}\uE001`).join(publicUrl)
+  }
+  return redacted
+}
+
+function redactPrivateData<T>(value: T): T {
+  if (typeof value === 'string') return redactPrivateText(value) as T
+  if (Array.isArray(value)) return value.map(redactPrivateData) as T
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactEmailAddresses(entry)])) as T
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactPrivateData(entry)])) as T
   }
   return value
 }
 
-function containsEmailAddress(value: unknown): boolean {
-  if (typeof value === 'string') return EMAIL_ADDRESS_PRESENT.test(value)
-  if (Array.isArray(value)) return value.some(containsEmailAddress)
-  if (value && typeof value === 'object') return Object.values(value).some(containsEmailAddress)
+function containsPrivateData(value: unknown): boolean {
+  if (typeof value === 'string') return redactPrivateText(value) !== value
+  if (Array.isArray(value)) return value.some(containsPrivateData)
+  if (value && typeof value === 'object') return Object.values(value).some(containsPrivateData)
   return false
 }
 
@@ -138,7 +172,7 @@ export async function createReleaseImportPlans(input: {
       const url = new URL(deploymentRun)
       if (url.protocol !== 'https:' || url.hostname !== 'github.com') throw new Error(`Deployment run for ${version} must be a GitHub HTTPS URL.`)
     }
-    const planWithoutDigest = redactEmailAddresses<Omit<ReleaseImportPlan, 'digest'>>({
+    const planWithoutDigest = redactPrivateData<Omit<ReleaseImportPlan, 'digest'>>({
       commits,
       component: {
         displayName: component.displayName,
@@ -208,7 +242,7 @@ export function validateReleaseImportPlan(candidate: unknown, config?: PlatformR
       throw new Error('Commit release import range is invalid.')
     }
   }
-  if (containsEmailAddress(plan)) throw new Error('Release import plans must not contain plain-text email addresses.')
+  if (containsPrivateData(plan)) throw new Error('Release import plans must not contain private local data or plain-text email addresses.')
   if (typeof plan.releaseUrl !== 'string' || typeof plan.targetSha !== 'string' || typeof plan.publishedAt !== 'string' || Number.isNaN(Date.parse(plan.publishedAt))) throw new Error('Release import publication metadata is invalid.')
   if (plan.deploymentRun !== null && typeof plan.deploymentRun !== 'string') throw new Error('Release import deployment evidence is invalid.')
   if (config) {
@@ -228,7 +262,7 @@ export function reuseReleaseImportPlan(
   config: PlatformReleaseConfig,
 ): ReleaseImportPlan {
   const existingObject = requireObject(existing, 'Existing release import plan') as unknown as ReleaseImportPlan
-  const redactedExisting = redactEmailAddresses(existingObject)
+  const redactedExisting = redactPrivateData(existingObject)
   const normalizedExisting = { ...redactedExisting, digest: importPlanDigest(redactedExisting) }
   const validatedExisting = validateReleaseImportPlan(normalizedExisting, config)
   const validatedCandidate = validateReleaseImportPlan(candidate, config)
