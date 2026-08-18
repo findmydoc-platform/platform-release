@@ -13,6 +13,7 @@ import {
   reuseReleaseImportPlan,
   serializeReleaseImportManifest,
   validateReleaseImportContent,
+  validateReleaseImportManifestFilename,
   validateReleaseImportPlan,
 } from '../../src/platform-release/import-release.js'
 import type { PlatformReleaseConfig, ReleaseContentV3, ReleaseImportGitHubClient } from '../../src/platform-release/types.js'
@@ -79,6 +80,13 @@ function content(): ReleaseContentV3 {
 describe('release import', () => {
   it('extracts explicit GitHub pull request references from release notes', () => {
     expect([...releaseNotesPullRequests('A https://github.com/findmydoc-platform/website/pull/42 and https://github.com/findmydoc-platform/website/pull/42')]).toEqual(['findmydoc-platform/website#42'])
+  })
+
+  it('accepts only safe append-only import manifest filenames', () => {
+    expect(validateReleaseImportManifestFilename('platform-release.json')).toBe('platform-release.json')
+    expect(validateReleaseImportManifestFilename('platform-release-retry-1.json')).toBe('platform-release-retry-1.json')
+    expect(() => validateReleaseImportManifestFilename('../platform-release.json')).toThrow('lowercase hyphenated variant')
+    expect(() => validateReleaseImportManifestFilename('platform-release-Retry.json')).toThrow('lowercase hyphenated variant')
   })
 
   it('plans a release from the exact tag range and flags notes discrepancies', async () => {

@@ -19,6 +19,7 @@ const CHANGE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const DIGEST = /^[a-f0-9]{64}$/
 const EMAIL_ADDRESS = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi
 const EMAIL_ADDRESS_PRESENT = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+const IMPORT_MANIFEST_FILENAME = /^platform-release(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?\.json$/
 const KINDS = new Set<ReleaseContentKind>(['feature', 'fix', 'maintenance'])
 
 function redactEmailAddresses<T>(value: T): T {
@@ -297,6 +298,13 @@ export function validateReleaseImportContent(plan: ReleaseImportPlan, candidate:
 
 export function releaseImportContentDigest(content: ReleaseContentV3): string {
   return sha256(canonicalJson(content))
+}
+
+export function validateReleaseImportManifestFilename(value: string): string {
+  if (!IMPORT_MANIFEST_FILENAME.test(value)) {
+    throw new Error('Release import manifest filename must be platform-release.json or a lowercase hyphenated variant.')
+  }
+  return value
 }
 
 export function buildReleaseImportManifest(plan: ReleaseImportPlan, content: ReleaseContentV3, config: PlatformReleaseConfig): PlatformReleaseManifestV3 {
