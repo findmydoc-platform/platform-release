@@ -49,6 +49,10 @@ function requireLine(value: unknown, label: string, maximum: number): string {
   return result
 }
 
+function boundManifestText(value: string, maximum: number): string {
+  return value.length <= maximum ? value : `${value.slice(0, maximum - 3)}...`
+}
+
 function pullRequestKey(repository: string, number: number): string {
   return `${repository.toLowerCase()}#${number}`
 }
@@ -279,12 +283,16 @@ export function buildReleaseImportManifest(plan: ReleaseImportPlan, content: Rel
   const withoutDigest: Omit<PlatformReleaseManifestV3, 'manifestDigest'> = {
     changes: validatedContent.changes,
     components: [{
-      commits: plan.commits,
+      commits: plan.commits.map((commit) => ({ ...commit, message: boundManifestText(commit.message, 1_000) })),
       deploymentRun: plan.deploymentRun,
       displayName: plan.component.displayName,
       key: plan.component.key,
       productionUrl: plan.component.productionUrl,
-      pullRequests: plan.pullRequests.map(({ body: _body, visuals: _visuals, ...pullRequest }) => pullRequest),
+      pullRequests: plan.pullRequests.map(({ body: _body, visuals: _visuals, ...pullRequest }) => ({
+        ...pullRequest,
+        issues: pullRequest.issues.map((issue) => ({ ...issue, title: boundManifestText(issue.title, 500) })),
+        title: boundManifestText(pullRequest.title, 500),
+      })),
       release: plan.releaseUrl,
       repository: plan.component.repository,
       targetSha: plan.targetSha,

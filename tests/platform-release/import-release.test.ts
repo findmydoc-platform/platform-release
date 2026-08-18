@@ -27,7 +27,7 @@ const config: PlatformReleaseConfig = {
 }
 
 const commits = [
-  { bump: 'minor' as const, message: 'feat: release\n\nCo-authored-by: Example Person <person@example.com>', sha: 'a'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'a'.repeat(40)}` },
+  { bump: 'minor' as const, message: `feat: release\n\nCo-authored-by: Example Person <person@example.com>\n\n${'x'.repeat(1_000)}`, sha: 'a'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'a'.repeat(40)}` },
   { bump: 'patch' as const, message: 'fix: orphan', sha: 'b'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'b'.repeat(40)}` },
 ]
 
@@ -39,10 +39,10 @@ function github(body = 'See https://github.com/findmydoc-platform/website/pull/4
     getPullRequests: vi.fn(async () => [{
       body: 'Contact person@example.com',
       commitShas: ['a'.repeat(40)],
-      issues: [{ number: 41, repository: 'findmydoc-platform/website', title: 'Issue for person@example.com', url: 'https://github.com/findmydoc-platform/website/issues/41' }],
+      issues: [{ number: 41, repository: 'findmydoc-platform/website', title: `Issue for person@example.com ${'i'.repeat(500)}`, url: 'https://github.com/findmydoc-platform/website/issues/41' }],
       number: 42,
       repository: 'findmydoc-platform/website',
-      title: 'feat: release for person@example.com',
+      title: `feat: release for person@example.com ${'p'.repeat(500)}`,
       url: 'https://github.com/findmydoc-platform/website/pull/42',
       visuals: [{ altText: 'Preview person@example.com', formFactor: 'desktop', label: 'Email person@example.com', pullRequestNumber: 42, releaseEligible: true, repository: 'findmydoc-platform/website', source: 'body', url: 'https://example.com/preview.png' }],
     }]),
@@ -85,8 +85,8 @@ describe('release import', () => {
     expect(valid.commits[0]?.message).toContain('[redacted-email]')
     expect(valid.pullRequests[0]).toMatchObject({
       body: 'Contact [redacted-email]',
-      issues: [{ title: 'Issue for [redacted-email]' }],
-      title: 'feat: release for [redacted-email]',
+      issues: [{ title: expect.stringContaining('Issue for [redacted-email]') }],
+      title: expect.stringContaining('feat: release for [redacted-email]'),
       visuals: [{ altText: 'Preview [redacted-email]', label: 'Email [redacted-email]' }],
     })
     expect(validateReleaseImportPlan({ ...valid, createdAt: '2030-01-01T00:00:00.000Z' }, config).digest).toBe(valid.digest)
@@ -99,7 +99,7 @@ describe('release import', () => {
     const legacyPlan = {
       ...valid,
       commits: valid.commits.map((commit, index) => index === 0
-        ? { ...commit, message: 'feat: release\n\nCo-authored-by: Example Person <person@example.com>' }
+        ? { ...commit, message: `feat: release\n\nCo-authored-by: Example Person <person@example.com>\n\n${'x'.repeat(1_000)}` }
         : commit),
       digest: '',
     }
@@ -125,6 +125,10 @@ describe('release import', () => {
     expect(manifest).toMatchObject({ notificationMode: 'silent', releaseMode: 'application', schemaVersion: 3, source: { kind: 'github-release-import' } })
     expect(manifest.publishedAt).toBe('2026-07-01T10:00:00Z')
     expect(manifest.components).toHaveLength(1)
+    expect(manifest.components[0]?.commits[0]?.message).toHaveLength(1_000)
+    expect(manifest.components[0]?.commits[0]?.message.endsWith('...')).toBe(true)
+    expect(manifest.components[0]?.pullRequests[0]?.title).toHaveLength(500)
+    expect(manifest.components[0]?.pullRequests[0]?.issues[0]?.title).toHaveLength(500)
     expect(manifest.components[0]?.deploymentRun).toBeNull()
     expect(serializeReleaseImportManifest(manifest)).toContain('"schemaVersion": 3')
   })
