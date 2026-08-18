@@ -2,6 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { canonicalJson, sha256 } from '../../src/platform-release/canonical.js'
 import {
   buildReleaseImportManifest,
   createReleaseImportBatch,
@@ -26,8 +27,11 @@ const config: PlatformReleaseConfig = {
   schemaVersion: 1,
 }
 
+const privateCommitPrefix = 'feat: release\n\nCo-authored-by: Example Person <person@example.com>\n\n'
+const redactedCommitPrefix = 'feat: release\n\nCo-authored-by: Example Person <[redacted-email]>\n\n'
+const boundaryPadding = 'x'.repeat(997 - redactedCommitPrefix.length)
 const commits = [
-  { bump: 'minor' as const, message: `feat: release\n\nCo-authored-by: Example Person <person@example.com>\n\n${'x'.repeat(1_000)}`, sha: 'a'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'a'.repeat(40)}` },
+  { bump: 'minor' as const, message: `${privateCommitPrefix}${boundaryPadding}😀suffix`, sha: 'a'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'a'.repeat(40)}` },
   { bump: 'patch' as const, message: 'fix: orphan', sha: 'b'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'b'.repeat(40)}` },
 ]
 
@@ -99,7 +103,7 @@ describe('release import', () => {
     const legacyPlan = {
       ...valid,
       commits: valid.commits.map((commit, index) => index === 0
-        ? { ...commit, message: `feat: release\n\nCo-authored-by: Example Person <person@example.com>\n\n${'x'.repeat(1_000)}` }
+        ? { ...commit, message: `${privateCommitPrefix}${boundaryPadding}😀suffix` }
         : commit),
       digest: '',
     }
@@ -127,6 +131,7 @@ describe('release import', () => {
     expect(manifest.components).toHaveLength(1)
     expect(manifest.components[0]?.commits[0]?.message).toHaveLength(1_000)
     expect(manifest.components[0]?.commits[0]?.message.endsWith('...')).toBe(true)
+    expect(manifest.components[0]?.commits[0]?.message).toBe(`${redactedCommitPrefix}${boundaryPadding}...`)
     expect(manifest.components[0]?.pullRequests[0]?.title).toHaveLength(500)
     expect(manifest.components[0]?.pullRequests[0]?.issues[0]?.title).toHaveLength(500)
     expect(manifest.components[0]?.deploymentRun).toBeNull()
@@ -159,5 +164,43 @@ describe('release import', () => {
     const result = await ingestReleaseImportBatch({ apply: true, batchPath, config, confirmBatchDigest: batch.digest }, { ingestManifest })
     expect(result).toEqual([{ replayed: true, url: `https://founder-ops.findmydoc.eu/team/platform-releases/${manifest.version}`, version: manifest.version }])
     expect(ingestManifest).toHaveBeenCalledTimes(1)
+  })
+
+  it('validates every stored manifest before the first remote write', async () => {
+    const releasePlan = await plan()
+    const manifest = buildReleaseImportManifest(releasePlan, content(), config)
+    const directory = await mkdtemp(join(tmpdir(), 'release-import-preflight-'))
+    const validDirectory = join(directory, manifest.version)
+    const invalidVersion = 'v0.44.0'
+    const invalidDirectory = join(directory, invalidVersion)
+    await import('node:fs/promises').then(({ mkdir }) => Promise.all([
+      mkdir(validDirectory, { recursive: true }),
+      mkdir(invalidDirectory, { recursive: true }),
+    ]))
+    await writeFile(join(validDirectory, 'platform-release.json'), serializeReleaseImportManifest(manifest), 'utf8')
+    const { manifestDigest: _manifestDigest, ...invalidWithoutDigest } = {
+      ...manifest,
+      components: manifest.components.map((component) => ({
+        ...component,
+        commits: component.commits.map((commit, index) => index === 0 ? { ...commit, message: 'x'.repeat(1_001) } : commit),
+      })),
+      version: invalidVersion,
+    }
+    const invalidManifest = {
+      ...invalidWithoutDigest,
+      manifestDigest: sha256(canonicalJson(invalidWithoutDigest)),
+    }
+    await writeFile(join(invalidDirectory, 'platform-release.json'), canonicalJson(invalidManifest), 'utf8')
+    const batch = createReleaseImportBatch([
+      { manifestDigest: manifest.manifestDigest, manifestPath: `${manifest.version}/platform-release.json`, version: manifest.version },
+      { manifestDigest: invalidManifest.manifestDigest, manifestPath: `${invalidVersion}/platform-release.json`, version: invalidVersion },
+    ])
+    const batchPath = join(directory, 'batch.json')
+    await writeFile(batchPath, `${JSON.stringify(batch, null, 2)}\n`, 'utf8')
+    const ingestManifest = vi.fn(async () => ({ replayed: false, url: 'https://founder-ops.findmydoc.eu/team/platform-releases/example' }))
+
+    await expect(ingestReleaseImportBatch({ apply: true, batchPath, config, confirmBatchDigest: batch.digest }, { ingestManifest }))
+      .rejects.toThrow()
+    expect(ingestManifest).not.toHaveBeenCalled()
   })
 })
