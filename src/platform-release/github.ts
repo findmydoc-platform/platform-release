@@ -42,6 +42,15 @@ type GitHubWorkflowRunsPage = {
   workflow_runs: GitHubWorkflowRun[]
 }
 
+type GitHubPullRequest = {
+  body: string | null
+  html_url: string
+  merge_commit_sha: string | null
+  merged_at: string | null
+  number: number
+  title: string
+}
+
 type GitHubDeployment = {
   id: number
   payload?: unknown
@@ -130,6 +139,18 @@ export function assertLinearReleaseComparison(
   if (comparison.status !== 'ahead' || comparison.merge_base_commit.sha !== base) {
     throw new Error(`${repository} release tags are not a linear ancestor range (${comparison.status}).`)
   }
+}
+
+export function verifiedSquashMergePullRequestNumber(
+  commit: Pick<ReleaseCommit, 'message' | 'sha'>,
+  pullRequest: Pick<GitHubPullRequest, 'merge_commit_sha' | 'merged_at' | 'number'>,
+): number | undefined {
+  const subject = commit.message.split('\n', 1)[0]?.trim() ?? ''
+  const match = subject.match(/\(#([1-9]\d*)\)$/)
+  if (!match || Number(match[1]) !== pullRequest.number || !pullRequest.merged_at || pullRequest.merge_commit_sha !== commit.sha) {
+    return undefined
+  }
+  return pullRequest.number
 }
 
 async function runGh(args: string[], input?: string, environment: NodeJS.ProcessEnv = process.env): Promise<string> {
@@ -285,6 +306,58 @@ function compactPullRequestBody(markdown: string): string {
   return compact.slice(0, 8_000)
 }
 
+export async function discoverReleasePullRequests(input: {
+  commits: ReleaseCommit[]
+  getAssociatedPullRequestNumbers: (commit: ReleaseCommit) => Promise<number[]>
+  getClosingIssues: (number: number) => Promise<ReleaseIssue[]>
+  getPullRequest: (number: number) => Promise<GitHubPullRequest | undefined>
+  repository: string
+}): Promise<ReleasePullRequest[]> {
+  const commitsByPullRequest = new Map<number, Set<string>>()
+  const pullRequestDetails = new Map<number, GitHubPullRequest>()
+  for (const commit of input.commits) {
+    const pullRequestNumbers = await input.getAssociatedPullRequestNumbers(commit)
+    if (pullRequestNumbers.length === 0) {
+      const subject = commit.message.split('\n', 1)[0]?.trim() ?? ''
+      const candidateNumber = Number(subject.match(/\(#([1-9]\d*)\)$/)?.[1])
+      if (Number.isSafeInteger(candidateNumber)) {
+        const candidate = await input.getPullRequest(candidateNumber)
+        if (candidate) {
+          const verifiedNumber = verifiedSquashMergePullRequestNumber(commit, candidate)
+          if (verifiedNumber !== undefined) {
+            pullRequestNumbers.push(verifiedNumber)
+            pullRequestDetails.set(verifiedNumber, candidate)
+          }
+        }
+      }
+    }
+    for (const number of pullRequestNumbers) {
+      const shas = commitsByPullRequest.get(number) ?? new Set<string>()
+      shas.add(commit.sha)
+      commitsByPullRequest.set(number, shas)
+    }
+  }
+
+  const pullRequests: ReleasePullRequest[] = []
+  for (const number of [...commitsByPullRequest.keys()].sort((left, right) => left - right)) {
+    const pull = pullRequestDetails.get(number) ?? await input.getPullRequest(number)
+    if (!pull) throw new Error(`${input.repository} pull request #${number} is unavailable.`)
+    if (!pull.merged_at) continue
+    const body = pull.body ?? ''
+    pullRequests.push({
+      body: compactPullRequestBody(body),
+      commitShas: [...(commitsByPullRequest.get(number) ?? [])].sort(),
+      issues: await input.getClosingIssues(number),
+      number: pull.number,
+      repository: input.repository,
+      title: pull.title,
+      url: pull.html_url,
+      visuals: extractReleaseVisuals(body, { pullRequestNumber: pull.number, repository: input.repository }),
+    })
+  }
+  return pullRequests
+}
+
 export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   async getPublishedReleases(repository: string): Promise<ImportedGitHubRelease[]> {
     const releases: GitHubRelease[] = []
@@ -372,35 +445,15 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   }
 
   async getPullRequests(repository: string, commits: ReleaseCommit[]): Promise<ReleasePullRequest[]> {
-    const commitsByPullRequest = new Map<number, Set<string>>()
-    for (const commit of commits) {
-      const pulls = await api<Array<{ number: number }>>(`repos/${repository}/commits/${commit.sha}/pulls`)
-      for (const pull of pulls) {
-        const shas = commitsByPullRequest.get(pull.number) ?? new Set<string>()
-        shas.add(commit.sha)
-        commitsByPullRequest.set(pull.number, shas)
-      }
-    }
-
-    const pullRequests: ReleasePullRequest[] = []
-    for (const number of [...commitsByPullRequest.keys()].sort((left, right) => left - right)) {
-      const pull = await api<{ body: string | null; html_url: string; merged_at: string | null; number: number; title: string }>(
-        `repos/${repository}/pulls/${number}`,
-      )
-      if (!pull.merged_at) continue
-      const body = pull.body ?? ''
-      pullRequests.push({
-        body: compactPullRequestBody(body),
-        commitShas: [...(commitsByPullRequest.get(number) ?? [])].sort(),
-        issues: await closingIssues(repository, number),
-        number: pull.number,
-        repository,
-        title: pull.title,
-        url: pull.html_url,
-        visuals: extractReleaseVisuals(body, { pullRequestNumber: pull.number, repository }),
-      })
-    }
-    return pullRequests
+    return discoverReleasePullRequests({
+      commits,
+      getAssociatedPullRequestNumbers: async (commit) => (await api<Array<{ number: number }>>(
+        `repos/${repository}/commits/${commit.sha}/pulls`,
+      )).map((pull) => pull.number),
+      getClosingIssues: async (number) => closingIssues(repository, number),
+      getPullRequest: async (number) => optionalApi<GitHubPullRequest>(`repos/${repository}/pulls/${number}`),
+      repository,
+    })
   }
 
   async isAncestor(repository: string, ancestor: string, branch: string): Promise<boolean> {

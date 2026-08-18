@@ -16,6 +16,7 @@ import {
   validateReleaseImportManifestFilename,
   validateReleaseImportPlan,
 } from '../../src/platform-release/import-release.js'
+import { discoverReleasePullRequests, verifiedSquashMergePullRequestNumber } from '../../src/platform-release/github.js'
 import type { PlatformReleaseConfig, ReleaseContentV3, ReleaseImportGitHubClient } from '../../src/platform-release/types.js'
 
 const config: PlatformReleaseConfig = {
@@ -78,6 +79,55 @@ function content(): ReleaseContentV3 {
 }
 
 describe('release import', () => {
+  it('recovers only an exact verified squash-merge pull request reference', () => {
+    const commit = { message: 'feat: historical release change (#123)\n\nDetails', sha: 'a'.repeat(40) }
+    const pullRequest = { merge_commit_sha: commit.sha, merged_at: '2025-01-01T00:00:00Z', number: 123 }
+
+    expect(verifiedSquashMergePullRequestNumber(commit, pullRequest)).toBe(123)
+    expect(verifiedSquashMergePullRequestNumber(commit, { ...pullRequest, merge_commit_sha: 'b'.repeat(40) })).toBeUndefined()
+    expect(verifiedSquashMergePullRequestNumber(commit, { ...pullRequest, merged_at: null })).toBeUndefined()
+    expect(verifiedSquashMergePullRequestNumber(commit, { ...pullRequest, number: 124 })).toBeUndefined()
+    expect(verifiedSquashMergePullRequestNumber({ ...commit, message: 'feat: untrusted reference #123' }, pullRequest)).toBeUndefined()
+  })
+
+  it('recovers a verified squash merge through the complete discovery path', async () => {
+    const commit = { bump: 'minor' as const, message: 'feat: historical release change (#123)', sha: 'a'.repeat(40), url: 'https://github.com/org/repo/commit/a' }
+    const getPullRequest = vi.fn(async () => ({
+      body: '## What changed\n\nHistorical change.',
+      html_url: 'https://github.com/org/repo/pull/123',
+      merge_commit_sha: commit.sha,
+      merged_at: '2025-01-01T00:00:00Z',
+      number: 123,
+      title: 'feat: historical release change',
+    }))
+    const result = await discoverReleasePullRequests({
+      commits: [commit],
+      getAssociatedPullRequestNumbers: vi.fn(async () => []),
+      getClosingIssues: vi.fn(async () => []),
+      getPullRequest,
+      repository: 'org/repo',
+    })
+
+    expect(result).toMatchObject([{ commitShas: [commit.sha], number: 123, repository: 'org/repo' }])
+    expect(getPullRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an unavailable squash reference orphaned and propagates other lookup errors', async () => {
+    const commit = { bump: 'minor' as const, message: 'feat: historical release change (#123)', sha: 'a'.repeat(40), url: 'https://github.com/org/repo/commit/a' }
+    const base = {
+      commits: [commit],
+      getAssociatedPullRequestNumbers: vi.fn(async () => []),
+      getClosingIssues: vi.fn(async () => []),
+      repository: 'org/repo',
+    }
+
+    await expect(discoverReleasePullRequests({ ...base, getPullRequest: vi.fn(async () => undefined) })).resolves.toEqual([])
+    await expect(discoverReleasePullRequests({
+      ...base,
+      getPullRequest: vi.fn(async () => { throw new Error('GitHub unavailable') }),
+    })).rejects.toThrow('GitHub unavailable')
+  })
+
   it('extracts explicit GitHub pull request references from release notes', () => {
     expect([...releaseNotesPullRequests('A https://github.com/findmydoc-platform/website/pull/42 and https://github.com/findmydoc-platform/website/pull/42')]).toEqual(['findmydoc-platform/website#42'])
   })
