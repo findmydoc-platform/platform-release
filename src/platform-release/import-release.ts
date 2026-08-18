@@ -112,16 +112,18 @@ export async function createReleaseImportPlans(input: {
     if (!release) throw new Error(`${component.repository} has no published regular release ${version}.`)
     const releaseIndex = releases.findIndex((candidate) => candidate.version === version)
     const previous = releaseIndex > 0 ? releases[releaseIndex - 1] : undefined
+    const identicalTarget = previous?.targetSha === release.targetSha
     const commits = previous
       ? await github.compareCommits(component.repository, previous.targetSha, release.targetSha)
       : await github.getAllCommits(component.repository, release.targetSha)
-    if (commits.length === 0) throw new Error(`${component.repository} ${version} has no commits in its release range.`)
+    if (commits.length === 0 && !identicalTarget) throw new Error(`${component.repository} ${version} has no commits in its release range.`)
     const pullRequests = await github.getPullRequests(component.repository, commits)
     const assignedCommitShas = new Set(pullRequests.flatMap((pullRequest) => pullRequest.commitShas))
     const orphanCommits = commits.filter((commit) => !assignedCommitShas.has(commit.sha)).map((commit) => commit.sha)
     const notesReferences = releaseNotesPullRequests(release.body)
     const mappedReferences = new Set(pullRequests.map((pullRequest) => pullRequestKey(pullRequest.repository, pullRequest.number)))
     const reviewRequired = [
+      ...(identicalTarget ? [`Release tag ${version} points to the same commit as previous release ${previous.version}; no unique commit range exists.`] : []),
       ...[...notesReferences].filter((reference) => !mappedReferences.has(reference)).map((reference) => `Release notes reference ${reference}, but the tag range does not.`),
       ...[...mappedReferences].filter((reference) => !notesReferences.has(reference)).map((reference) => `Tag range contains ${reference}, but the release notes do not reference it.`),
       ...(!release.body.trim() ? ['GitHub release notes are empty.'] : []),
@@ -145,10 +147,14 @@ export async function createReleaseImportPlans(input: {
       previousVersion: previous?.version ?? null,
       publishedAt: release.publishedAt,
       pullRequests,
+      range: {
+        kind: !previous ? 'initial' : identicalTarget ? 'identical' : 'commits',
+        previousTargetSha: previous?.targetSha ?? null,
+      },
       releaseNotes: release.body,
       releaseUrl: release.releaseUrl,
       reviewRequired,
-      schemaVersion: 1,
+      schemaVersion: 2,
       targetSha: release.targetSha,
       version,
     })
@@ -160,10 +166,32 @@ export async function createReleaseImportPlans(input: {
 
 export function validateReleaseImportPlan(candidate: unknown, config?: PlatformReleaseConfig): ReleaseImportPlan {
   const plan = requireObject(candidate, 'Release import plan') as unknown as ReleaseImportPlan
-  if (plan.schemaVersion !== 1 || !/^v\d+\.\d+\.\d+$/.test(plan.version) || !DIGEST.test(plan.digest)) throw new Error('Release import plan identity is invalid.')
+  if (![1, 2].includes(plan.schemaVersion) || !/^v\d+\.\d+\.\d+$/.test(plan.version) || !DIGEST.test(plan.digest)) throw new Error('Release import plan identity is invalid.')
   if (!plan.component || typeof plan.component.key !== 'string' || typeof plan.component.repository !== 'string' ||
     typeof plan.component.displayName !== 'string' || typeof plan.component.productionUrl !== 'string') throw new Error('Release import component is invalid.')
   if (!Array.isArray(plan.commits) || !Array.isArray(plan.pullRequests) || !Array.isArray(plan.orphanCommits) || !Array.isArray(plan.reviewRequired)) throw new Error('Release import provenance is incomplete.')
+  if (plan.schemaVersion === 1) {
+    if (plan.range !== undefined || plan.commits.length === 0) throw new Error('Legacy release import range is invalid.')
+  } else {
+    if (!plan.range || !['commits', 'identical', 'initial'].includes(plan.range.kind) ||
+      (plan.range.previousTargetSha !== null && !/^[a-f0-9]{40}$/.test(plan.range.previousTargetSha))) {
+      throw new Error('Release import range provenance is invalid.')
+    }
+    const identicalFinding = plan.previousVersion === null
+      ? null
+      : `Release tag ${plan.version} points to the same commit as previous release ${plan.previousVersion}; no unique commit range exists.`
+    if (plan.range.kind === 'initial') {
+      if (plan.previousVersion !== null || plan.range.previousTargetSha !== null || plan.commits.length === 0) throw new Error('Initial release import range is invalid.')
+    } else if (plan.range.kind === 'identical') {
+      if (plan.previousVersion === null || plan.range.previousTargetSha !== plan.targetSha || plan.commits.length !== 0 ||
+        plan.pullRequests.length !== 0 || plan.orphanCommits.length !== 0 || !identicalFinding || !plan.reviewRequired.includes(identicalFinding)) {
+        throw new Error('Identical release import range is invalid.')
+      }
+    } else if (plan.previousVersion === null || plan.range.previousTargetSha === null ||
+      plan.range.previousTargetSha === plan.targetSha || plan.commits.length === 0) {
+      throw new Error('Commit release import range is invalid.')
+    }
+  }
   if (containsEmailAddress(plan)) throw new Error('Release import plans must not contain plain-text email addresses.')
   if (typeof plan.releaseUrl !== 'string' || typeof plan.targetSha !== 'string' || typeof plan.publishedAt !== 'string' || Number.isNaN(Date.parse(plan.publishedAt))) throw new Error('Release import publication metadata is invalid.')
   if (plan.deploymentRun !== null && typeof plan.deploymentRun !== 'string') throw new Error('Release import deployment evidence is invalid.')
@@ -188,10 +216,14 @@ export function reuseReleaseImportPlan(
   const normalizedExisting = { ...redactedExisting, digest: importPlanDigest(redactedExisting) }
   const validatedExisting = validateReleaseImportPlan(normalizedExisting, config)
   const validatedCandidate = validateReleaseImportPlan(candidate, config)
-  if (validatedExisting.digest !== validatedCandidate.digest) {
-    throw new Error('Existing release import plan differs from the current durable GitHub state.')
+  if (validatedExisting.digest === validatedCandidate.digest) return validatedExisting
+  if (validatedExisting.schemaVersion === 1 && validatedCandidate.schemaVersion === 2 && validatedCandidate.range?.kind !== 'identical') {
+    const { range: _range, ...legacyCandidate } = validatedCandidate
+    const compatibleCandidate = { ...legacyCandidate, schemaVersion: 1 as const, digest: '' }
+    compatibleCandidate.digest = importPlanDigest(compatibleCandidate)
+    if (validatedExisting.digest === compatibleCandidate.digest) return validatedExisting
   }
-  return validatedExisting
+  throw new Error('Existing release import plan differs from the current durable GitHub state.')
 }
 
 function defaultKind(title: string): ReleaseContentKind {
@@ -223,6 +255,18 @@ export function releaseImportContentTemplate(plan: ReleaseImportPlan): ReleaseCo
       visualUrls: [],
     })),
   ]
+  if (changes.length === 0) {
+    changes.push({
+      commitShas: [],
+      componentKeys: [plan.component.key],
+      id: `${plan.component.key}-release-record`,
+      kind: 'maintenance',
+      pullRequests: [],
+      summary: '',
+      title: '',
+      visualUrls: [],
+    })
+  }
   return {
     changes,
     highlights: changes.slice(0, 6).map((change) => change.id),
@@ -233,6 +277,7 @@ export function releaseImportContentTemplate(plan: ReleaseImportPlan): ReleaseCo
 }
 
 export function validateReleaseImportContent(plan: ReleaseImportPlan, candidate: unknown): ReleaseContentV3 {
+  validateReleaseImportPlan(plan)
   const value = requireObject(candidate, 'Release import content')
   if (value.schemaVersion !== 2) throw new Error('Unsupported release import content schema.')
   const summary = requireLine(value.summary, 'Release summary', 280)
@@ -263,7 +308,8 @@ export function validateReleaseImportContent(plan: ReleaseImportPlan, candidate:
       assignedOrphans.add(sha)
       return sha
     })
-    if (pullRequests.length === 0 && commitShas.length === 0) throw new Error(`Change ${id} must assign at least one pull request or orphan commit.`)
+    const emptyReleaseRange = plan.schemaVersion === 2 && plan.range?.kind === 'identical' && plan.commits.length === 0 && plannedPullRequests.size === 0 && plannedOrphans.size === 0
+    if (pullRequests.length === 0 && commitShas.length === 0 && !emptyReleaseRange) throw new Error(`Change ${id} must assign at least one pull request or orphan commit.`)
     return {
       commitShas,
       componentKeys: [plan.component.key],

@@ -9,6 +9,7 @@ import {
   createReleaseImportPlans,
   ingestReleaseImportBatch,
   releaseImportContentDigest,
+  releaseImportContentTemplate,
   releaseNotesPullRequests,
   reuseReleaseImportPlan,
   serializeReleaseImportManifest,
@@ -180,6 +181,7 @@ describe('release import', () => {
 
   it('plans a release from the exact tag range and flags notes discrepancies', async () => {
     const valid = await plan()
+    expect(valid.schemaVersion).toBe(2)
     expect(valid.reviewRequired).toEqual([])
     expect(valid.orphanCommits).toEqual(['b'.repeat(40)])
     expect(JSON.stringify(valid)).not.toMatch(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
@@ -210,8 +212,65 @@ describe('release import', () => {
     })
     expect(JSON.stringify(reuseReleaseImportPlan(legacyPlan, valid, config))).not.toContain('person@example.com')
 
+    const { range: _range, ...legacyV1WithoutRange } = valid
+    const legacyV1 = { ...legacyV1WithoutRange, schemaVersion: 1 as const, digest: '' }
+    legacyV1.digest = sha256(canonicalJson((({ createdAt: _createdAt, digest: _ignored, ...durable }) => durable)(legacyV1)))
+    expect(validateReleaseImportPlan(JSON.parse(JSON.stringify(legacyV1)), config)).toMatchObject({ schemaVersion: 1 })
+    expect(reuseReleaseImportPlan(legacyV1, valid, config)).toEqual(legacyV1)
+
     const discrepant = (await createReleaseImportPlans({ componentKey: 'website', config, versions: ['v0.45.0'] }, github('No pull request link')))[0]!
     expect(discrepant.reviewRequired).toEqual(['Tag range contains findmydoc-platform/website#42, but the release notes do not reference it.'])
+  })
+
+  it('plans and builds a reviewed release when adjacent tags point to the same commit', async () => {
+    const targetSha = 'c'.repeat(40)
+    const notes = 'See https://github.com/findmydoc-platform/website/pull/236'
+    const identicalGithub: ReleaseImportGitHubClient = {
+      compareCommits: vi.fn(async () => []),
+      getAllCommits: vi.fn(async () => []),
+      getPublishedReleases: vi.fn(async () => [
+        { body: notes, publishedAt: '2025-07-04T14:57:53Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.7.5', targetSha, version: 'v0.7.5' },
+        { body: notes, publishedAt: '2025-07-06T21:43:46Z', releaseUrl: 'https://github.com/findmydoc-platform/website/releases/tag/v0.8.0', targetSha, version: 'v0.8.0' },
+      ]),
+      getPullRequests: vi.fn(async () => []),
+    }
+    const releasePlan = (await createReleaseImportPlans(
+      { componentKey: 'website', config, versions: ['v0.8.0'] },
+      identicalGithub,
+    ))[0]!
+
+    expect(releasePlan.commits).toEqual([])
+    expect(releasePlan.reviewRequired).toEqual([
+      'Release tag v0.8.0 points to the same commit as previous release v0.7.5; no unique commit range exists.',
+      'Release notes reference findmydoc-platform/website#236, but the tag range does not.',
+    ])
+    const template = releaseImportContentTemplate(releasePlan)
+    const approvedContent = {
+      ...template,
+      changes: template.changes.map((change) => ({
+        ...change,
+        summary: 'Die veröffentlichte Version verwendet denselben Code-Stand wie die vorherige Version.',
+        title: 'Dokumentierter Versionsstand',
+      })),
+      reviewAcknowledgements: [...releasePlan.reviewRequired],
+      summary: 'Die Website dokumentiert einen weiteren veröffentlichten Versionsstand ohne eigenen Commit-Bereich.',
+    }
+    expect(validateReleaseImportContent(releasePlan, approvedContent).changes[0]).toMatchObject({
+      commitShas: [],
+      pullRequests: [],
+    })
+    expect(buildReleaseImportManifest(releasePlan, approvedContent, config).components[0]?.commits).toEqual([])
+
+    const { digest: _digest, range: _range, ...unboundPlan } = releasePlan
+    const invalidPlan = {
+      ...unboundPlan,
+      digest: '',
+      schemaVersion: 2 as const,
+      range: { kind: 'commits' as const, previousTargetSha: 'd'.repeat(40) },
+    }
+    invalidPlan.digest = sha256(canonicalJson((({ createdAt: _createdAt, digest: _ignored, ...durable }) => durable)(invalidPlan)))
+    expect(() => validateReleaseImportPlan(invalidPlan, config)).toThrow('Commit release import range is invalid')
+    expect(() => validateReleaseImportContent(invalidPlan, approvedContent)).toThrow('Commit release import range is invalid')
   })
 
   it('requires complete PR and orphan-commit attribution and creates a silent application manifest', async () => {
