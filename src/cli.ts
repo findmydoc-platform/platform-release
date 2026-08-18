@@ -25,6 +25,7 @@ import {
   reuseReleaseImportPlan,
   serializeReleaseImportManifest,
   validateReleaseImportContent,
+  validateReleaseImportManifestFilename,
   validateReleaseImportPlan,
 } from './platform-release/import-release.js'
 import {
@@ -74,7 +75,7 @@ type RecoverOptions = {
   plan: string
 }
 type ImportPlanOptions = { archiveRoot: string; componentKey: string; configPath: string; deploymentRuns?: string; json?: boolean; versions: string }
-type ImportBuildOptions = { archiveRoot: string; batchOutput: string; configPath: string; json?: boolean; versions: string }
+type ImportBuildOptions = { archiveRoot: string; batchOutput: string; configPath: string; json?: boolean; manifestName: string; versions: string }
 type ImportIngestOptions = { apply: boolean; batch: string; configPath: string; confirmBatchDigest: string; json?: boolean }
 type CliRuntime = {
   createAnnouncementStore: () => PlatformReleaseAnnouncementStore
@@ -437,6 +438,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
     .requiredOption('--versions <versions>', 'comma-separated semantic versions; maximum eight')
     .requiredOption('--archive-root <path>', 'directory containing version archives')
     .requiredOption('--batch-output <path>', 'batch index path directly below the archive root')
+    .option('--manifest-name <name>', 'append-only manifest filename for this batch', 'platform-release.json')
     .option('--config-path <path>', 'trusted release component catalog', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
     .option('--json', 'emit JSON output')
     .action(async (options: ImportBuildOptions) => {
@@ -444,6 +446,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
         const config = await loadPlatformReleaseConfig(options.configPath)
         const archiveRoot = resolve(options.archiveRoot)
         const batchOutput = resolve(options.batchOutput)
+        const manifestName = validateReleaseImportManifestFilename(options.manifestName)
         if (dirname(batchOutput) !== archiveRoot) throw new Error('--batch-output must be directly below --archive-root.')
         const entries = []
         const releases = []
@@ -453,7 +456,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
           if (plan.version !== version) throw new Error(`Archive directory ${version} contains plan ${plan.version}.`)
           const content = validateReleaseImportContent(plan, JSON.parse(await readFile(resolve(releaseDirectory, 'release-content.json'), 'utf8')))
           const manifest = buildReleaseImportManifest(plan, content, config)
-          const manifestPath = resolve(releaseDirectory, 'platform-release.json')
+          const manifestPath = resolve(releaseDirectory, manifestName)
           await writeImmutable(manifestPath, serializeReleaseImportManifest(manifest))
           entries.push({ manifestDigest: manifest.manifestDigest, manifestPath: relative(archiveRoot, manifestPath), version })
           releases.push({
