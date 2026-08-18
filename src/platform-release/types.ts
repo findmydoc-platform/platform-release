@@ -228,7 +228,11 @@ export type ImportedGitHubRelease = {
 }
 
 export type ReleaseImportGitHubClient = {
-  compareCommits(repository: string, base: string, head: string): Promise<ReleaseCommit[]>
+  compareReleaseCommits(repository: string, base: string, head: string): Promise<{
+    commits: ReleaseCommit[]
+    mergeBaseSha: string
+    status: 'ahead' | 'diverged' | 'identical'
+  }>
   getAllCommits(repository: string, head: string): Promise<ReleaseCommit[]>
   getPublishedReleases(repository: string): Promise<ImportedGitHubRelease[]>
   getPullRequests(repository: string, commits: ReleaseCommit[]): Promise<ReleasePullRequest[]>
@@ -249,7 +253,8 @@ export type ReleaseImportPlan = {
   publishedAt: string
   pullRequests: ReleasePullRequest[]
   range?: {
-    kind: 'commits' | 'identical' | 'initial'
+    kind: 'commits' | 'diverged' | 'identical' | 'initial'
+    mergeBaseSha?: string
     previousTargetSha: string | null
   }
   releaseNotes: string

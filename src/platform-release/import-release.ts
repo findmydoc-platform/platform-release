@@ -112,10 +112,14 @@ export async function createReleaseImportPlans(input: {
     if (!release) throw new Error(`${component.repository} has no published regular release ${version}.`)
     const releaseIndex = releases.findIndex((candidate) => candidate.version === version)
     const previous = releaseIndex > 0 ? releases[releaseIndex - 1] : undefined
-    const identicalTarget = previous?.targetSha === release.targetSha
-    const commits = previous
-      ? await github.compareCommits(component.repository, previous.targetSha, release.targetSha)
-      : await github.getAllCommits(component.repository, release.targetSha)
+    const comparison = previous
+      ? await github.compareReleaseCommits(component.repository, previous.targetSha, release.targetSha)
+      : undefined
+    const identicalTarget = comparison?.status === 'identical'
+    const commits = comparison?.commits ?? await github.getAllCommits(component.repository, release.targetSha)
+    if (comparison?.status === 'ahead' && comparison.mergeBaseSha !== previous?.targetSha) throw new Error(`${component.repository} ${version} has an invalid linear comparison.`)
+    if (comparison?.status === 'identical' && (previous?.targetSha !== release.targetSha || comparison.mergeBaseSha !== release.targetSha || commits.length !== 0)) throw new Error(`${component.repository} ${version} has an invalid identical comparison.`)
+    if (comparison?.status === 'diverged' && (previous?.targetSha === release.targetSha || comparison.mergeBaseSha === previous?.targetSha || comparison.mergeBaseSha === release.targetSha || commits.length === 0)) throw new Error(`${component.repository} ${version} has an invalid diverged comparison.`)
     if (commits.length === 0 && !identicalTarget) throw new Error(`${component.repository} ${version} has no commits in its release range.`)
     const pullRequests = await github.getPullRequests(component.repository, commits)
     const assignedCommitShas = new Set(pullRequests.flatMap((pullRequest) => pullRequest.commitShas))
@@ -123,7 +127,8 @@ export async function createReleaseImportPlans(input: {
     const notesReferences = releaseNotesPullRequests(release.body)
     const mappedReferences = new Set(pullRequests.map((pullRequest) => pullRequestKey(pullRequest.repository, pullRequest.number)))
     const reviewRequired = [
-      ...(identicalTarget ? [`Release tag ${version} points to the same commit as previous release ${previous.version}; no unique commit range exists.`] : []),
+      ...(identicalTarget && previous ? [`Release tag ${version} points to the same commit as previous release ${previous.version}; no unique commit range exists.`] : []),
+      ...(comparison?.status === 'diverged' && previous ? [`Release tag ${version} diverges from previous release ${previous.version} at merge base ${comparison.mergeBaseSha}; the plan contains only commits unique to ${version}.`] : []),
       ...[...notesReferences].filter((reference) => !mappedReferences.has(reference)).map((reference) => `Release notes reference ${reference}, but the tag range does not.`),
       ...[...mappedReferences].filter((reference) => !notesReferences.has(reference)).map((reference) => `Tag range contains ${reference}, but the release notes do not reference it.`),
       ...(!release.body.trim() ? ['GitHub release notes are empty.'] : []),
@@ -148,7 +153,8 @@ export async function createReleaseImportPlans(input: {
       publishedAt: release.publishedAt,
       pullRequests,
       range: {
-        kind: !previous ? 'initial' : identicalTarget ? 'identical' : 'commits',
+        kind: !previous ? 'initial' : comparison?.status === 'diverged' ? 'diverged' : identicalTarget ? 'identical' : 'commits',
+        ...(comparison?.status === 'diverged' ? { mergeBaseSha: comparison.mergeBaseSha } : {}),
         previousTargetSha: previous?.targetSha ?? null,
       },
       releaseNotes: release.body,
@@ -173,22 +179,32 @@ export function validateReleaseImportPlan(candidate: unknown, config?: PlatformR
   if (plan.schemaVersion === 1) {
     if (plan.range !== undefined || plan.commits.length === 0) throw new Error('Legacy release import range is invalid.')
   } else {
-    if (!plan.range || !['commits', 'identical', 'initial'].includes(plan.range.kind) ||
-      (plan.range.previousTargetSha !== null && !/^[a-f0-9]{40}$/.test(plan.range.previousTargetSha))) {
+    if (!plan.range || !['commits', 'diverged', 'identical', 'initial'].includes(plan.range.kind) ||
+      (plan.range.previousTargetSha !== null && !/^[a-f0-9]{40}$/.test(plan.range.previousTargetSha)) ||
+      (plan.range.mergeBaseSha !== undefined && !/^[a-f0-9]{40}$/.test(plan.range.mergeBaseSha))) {
       throw new Error('Release import range provenance is invalid.')
     }
     const identicalFinding = plan.previousVersion === null
       ? null
       : `Release tag ${plan.version} points to the same commit as previous release ${plan.previousVersion}; no unique commit range exists.`
+    const divergedFinding = plan.previousVersion === null || plan.range.mergeBaseSha === undefined
+      ? null
+      : `Release tag ${plan.version} diverges from previous release ${plan.previousVersion} at merge base ${plan.range.mergeBaseSha}; the plan contains only commits unique to ${plan.version}.`
     if (plan.range.kind === 'initial') {
-      if (plan.previousVersion !== null || plan.range.previousTargetSha !== null || plan.commits.length === 0) throw new Error('Initial release import range is invalid.')
+      if (plan.previousVersion !== null || plan.range.previousTargetSha !== null || plan.range.mergeBaseSha !== undefined || plan.commits.length === 0) throw new Error('Initial release import range is invalid.')
     } else if (plan.range.kind === 'identical') {
-      if (plan.previousVersion === null || plan.range.previousTargetSha !== plan.targetSha || plan.commits.length !== 0 ||
+      if (plan.previousVersion === null || plan.range.previousTargetSha !== plan.targetSha || plan.range.mergeBaseSha !== undefined || plan.commits.length !== 0 ||
         plan.pullRequests.length !== 0 || plan.orphanCommits.length !== 0 || !identicalFinding || !plan.reviewRequired.includes(identicalFinding)) {
         throw new Error('Identical release import range is invalid.')
       }
+    } else if (plan.range.kind === 'diverged') {
+      if (plan.previousVersion === null || plan.range.previousTargetSha === null || plan.range.previousTargetSha === plan.targetSha ||
+        plan.range.mergeBaseSha === undefined || plan.range.mergeBaseSha === plan.range.previousTargetSha || plan.range.mergeBaseSha === plan.targetSha ||
+        plan.commits.length === 0 || !divergedFinding || !plan.reviewRequired.includes(divergedFinding)) {
+        throw new Error('Diverged release import range is invalid.')
+      }
     } else if (plan.previousVersion === null || plan.range.previousTargetSha === null ||
-      plan.range.previousTargetSha === plan.targetSha || plan.commits.length === 0) {
+      plan.range.previousTargetSha === plan.targetSha || plan.range.mergeBaseSha !== undefined || plan.commits.length === 0) {
       throw new Error('Commit release import range is invalid.')
     }
   }
@@ -217,7 +233,8 @@ export function reuseReleaseImportPlan(
   const validatedExisting = validateReleaseImportPlan(normalizedExisting, config)
   const validatedCandidate = validateReleaseImportPlan(candidate, config)
   if (validatedExisting.digest === validatedCandidate.digest) return validatedExisting
-  if (validatedExisting.schemaVersion === 1 && validatedCandidate.schemaVersion === 2 && validatedCandidate.range?.kind !== 'identical') {
+  if (validatedExisting.schemaVersion === 1 && validatedCandidate.schemaVersion === 2 &&
+    validatedCandidate.range?.kind !== 'identical' && validatedCandidate.range?.kind !== 'diverged') {
     const { range: _range, ...legacyCandidate } = validatedCandidate
     const compatibleCandidate = { ...legacyCandidate, schemaVersion: 1 as const, digest: '' }
     compatibleCandidate.digest = importPlanDigest(compatibleCandidate)
