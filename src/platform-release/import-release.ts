@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises'
-import { dirname, isAbsolute, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { canonicalJson, sha256 } from './canonical.js'
 import { compareVersions, parseVersion } from './semver.js'
 import { validateManifestAgainstConfig, validateReleaseManifest } from './manifest.js'
@@ -47,6 +47,32 @@ function requireLine(value: unknown, label: string, maximum: number): string {
   const result = value.trim()
   if (!result || result.length > maximum || /[\r\n]/.test(result)) throw new Error(`${label} must be one non-empty line with at most ${maximum} characters.`)
   return result
+}
+
+function boundManifestText(value: string, maximum: number): string {
+  if (value.length <= maximum) return value
+  const symbols: string[] = []
+  let length = 0
+  for (const symbol of value) {
+    if (length + symbol.length > maximum - 3) break
+    symbols.push(symbol)
+    length += symbol.length
+  }
+  return `${symbols.join('')}...`
+}
+
+function validateReleaseImportManifestText(manifest: PlatformReleaseManifestV3): void {
+  for (const component of manifest.components) {
+    for (const commit of component.commits) {
+      if (typeof commit.message !== 'string' || commit.message.length > 1_000) throw new Error(`Commit message is invalid in ${manifest.version}.`)
+    }
+    for (const pullRequest of component.pullRequests) {
+      if (typeof pullRequest.title !== 'string' || pullRequest.title.length > 500) throw new Error(`Pull request title is invalid in ${manifest.version}.`)
+      for (const issue of pullRequest.issues) {
+        if (typeof issue.title !== 'string' || issue.title.length > 500) throw new Error(`Issue title is invalid in ${manifest.version}.`)
+      }
+    }
+  }
 }
 
 function pullRequestKey(repository: string, number: number): string {
@@ -279,12 +305,16 @@ export function buildReleaseImportManifest(plan: ReleaseImportPlan, content: Rel
   const withoutDigest: Omit<PlatformReleaseManifestV3, 'manifestDigest'> = {
     changes: validatedContent.changes,
     components: [{
-      commits: plan.commits,
+      commits: plan.commits.map((commit) => ({ ...commit, message: boundManifestText(commit.message, 1_000) })),
       deploymentRun: plan.deploymentRun,
       displayName: plan.component.displayName,
       key: plan.component.key,
       productionUrl: plan.component.productionUrl,
-      pullRequests: plan.pullRequests.map(({ body: _body, visuals: _visuals, ...pullRequest }) => pullRequest),
+      pullRequests: plan.pullRequests.map(({ body: _body, visuals: _visuals, ...pullRequest }) => ({
+        ...pullRequest,
+        issues: pullRequest.issues.map((issue) => ({ ...issue, title: boundManifestText(issue.title, 500) })),
+        title: boundManifestText(pullRequest.title, 500),
+      })),
       release: plan.releaseUrl,
       repository: plan.component.repository,
       targetSha: plan.targetSha,
@@ -348,17 +378,25 @@ export async function ingestReleaseImportBatch(input: {
   const batch = validateReleaseImportBatch(JSON.parse(await readFile(batchPath, 'utf8')))
   if (input.confirmBatchDigest !== batch.digest) throw new Error(`Batch digest confirmation must exactly match ${batch.digest}.`)
   const root = dirname(batchPath)
-  const results: Array<{ replayed: boolean; url: string; version: string }> = []
+  const prepared: Array<{ manifest: PlatformReleaseManifestV3; serialized: string }> = []
   for (const entry of batch.releases) {
     const manifestPath = resolve(root, entry.manifestPath)
-    if (relative(root, manifestPath).startsWith('..')) throw new Error(`Manifest path escapes the batch directory for ${entry.version}.`)
+    const relativeManifestPath = relative(root, manifestPath)
+    if (relativeManifestPath === '..' || relativeManifestPath.startsWith(`..${sep}`) || isAbsolute(relativeManifestPath)) {
+      throw new Error(`Manifest path escapes the batch directory for ${entry.version}.`)
+    }
     const manifest = validateReleaseManifest(JSON.parse(await readFile(manifestPath, 'utf8'))) as PlatformReleaseManifestV3
     if (manifest.schemaVersion !== 3 || manifest.releaseMode !== 'application' || manifest.notificationMode !== 'silent' || manifest.source?.kind !== 'github-release-import' || manifest.version !== entry.version) {
       throw new Error(`Stored manifest is not a silent application import for ${entry.version}.`)
     }
     validateManifestAgainstConfig(manifest, input.config)
+    validateReleaseImportManifestText(manifest)
     const serialized = serializeReleaseImportManifest(manifest)
     if (manifest.manifestDigest !== entry.manifestDigest) throw new Error(`Stored manifest digest differs from the batch for ${entry.version}.`)
+    prepared.push({ manifest, serialized })
+  }
+  const results: Array<{ replayed: boolean; url: string; version: string }> = []
+  for (const { manifest, serialized } of prepared) {
     const result = await founderOps.ingestManifest({ manifest: serialized, manifestDigest: manifest.manifestDigest })
     results.push({ ...result, version: manifest.version })
   }

@@ -2,6 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { canonicalJson, sha256 } from '../../src/platform-release/canonical.js'
 import {
   buildReleaseImportManifest,
   createReleaseImportBatch,
@@ -26,8 +27,11 @@ const config: PlatformReleaseConfig = {
   schemaVersion: 1,
 }
 
+const privateCommitPrefix = 'feat: release\n\nCo-authored-by: Example Person <person@example.com>\n\n'
+const redactedCommitPrefix = 'feat: release\n\nCo-authored-by: Example Person <[redacted-email]>\n\n'
+const boundaryPadding = 'x'.repeat(997 - redactedCommitPrefix.length)
 const commits = [
-  { bump: 'minor' as const, message: 'feat: release\n\nCo-authored-by: Example Person <person@example.com>', sha: 'a'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'a'.repeat(40)}` },
+  { bump: 'minor' as const, message: `${privateCommitPrefix}${boundaryPadding}😀suffix`, sha: 'a'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'a'.repeat(40)}` },
   { bump: 'patch' as const, message: 'fix: orphan', sha: 'b'.repeat(40), url: `https://github.com/findmydoc-platform/website/commit/${'b'.repeat(40)}` },
 ]
 
@@ -39,10 +43,10 @@ function github(body = 'See https://github.com/findmydoc-platform/website/pull/4
     getPullRequests: vi.fn(async () => [{
       body: 'Contact person@example.com',
       commitShas: ['a'.repeat(40)],
-      issues: [{ number: 41, repository: 'findmydoc-platform/website', title: 'Issue for person@example.com', url: 'https://github.com/findmydoc-platform/website/issues/41' }],
+      issues: [{ number: 41, repository: 'findmydoc-platform/website', title: `Issue for person@example.com ${'i'.repeat(500)}`, url: 'https://github.com/findmydoc-platform/website/issues/41' }],
       number: 42,
       repository: 'findmydoc-platform/website',
-      title: 'feat: release for person@example.com',
+      title: `feat: release for person@example.com ${'p'.repeat(500)}`,
       url: 'https://github.com/findmydoc-platform/website/pull/42',
       visuals: [{ altText: 'Preview person@example.com', formFactor: 'desktop', label: 'Email person@example.com', pullRequestNumber: 42, releaseEligible: true, repository: 'findmydoc-platform/website', source: 'body', url: 'https://example.com/preview.png' }],
     }]),
@@ -85,8 +89,8 @@ describe('release import', () => {
     expect(valid.commits[0]?.message).toContain('[redacted-email]')
     expect(valid.pullRequests[0]).toMatchObject({
       body: 'Contact [redacted-email]',
-      issues: [{ title: 'Issue for [redacted-email]' }],
-      title: 'feat: release for [redacted-email]',
+      issues: [{ title: expect.stringContaining('Issue for [redacted-email]') }],
+      title: expect.stringContaining('feat: release for [redacted-email]'),
       visuals: [{ altText: 'Preview [redacted-email]', label: 'Email [redacted-email]' }],
     })
     expect(validateReleaseImportPlan({ ...valid, createdAt: '2030-01-01T00:00:00.000Z' }, config).digest).toBe(valid.digest)
@@ -99,7 +103,7 @@ describe('release import', () => {
     const legacyPlan = {
       ...valid,
       commits: valid.commits.map((commit, index) => index === 0
-        ? { ...commit, message: 'feat: release\n\nCo-authored-by: Example Person <person@example.com>' }
+        ? { ...commit, message: `${privateCommitPrefix}${boundaryPadding}😀suffix` }
         : commit),
       digest: '',
     }
@@ -125,6 +129,11 @@ describe('release import', () => {
     expect(manifest).toMatchObject({ notificationMode: 'silent', releaseMode: 'application', schemaVersion: 3, source: { kind: 'github-release-import' } })
     expect(manifest.publishedAt).toBe('2026-07-01T10:00:00Z')
     expect(manifest.components).toHaveLength(1)
+    expect(manifest.components[0]?.commits[0]?.message).toHaveLength(1_000)
+    expect(manifest.components[0]?.commits[0]?.message.endsWith('...')).toBe(true)
+    expect(manifest.components[0]?.commits[0]?.message).toBe(`${redactedCommitPrefix}${boundaryPadding}...`)
+    expect(manifest.components[0]?.pullRequests[0]?.title).toHaveLength(500)
+    expect(manifest.components[0]?.pullRequests[0]?.issues[0]?.title).toHaveLength(500)
     expect(manifest.components[0]?.deploymentRun).toBeNull()
     expect(serializeReleaseImportManifest(manifest)).toContain('"schemaVersion": 3')
   })
@@ -155,5 +164,66 @@ describe('release import', () => {
     const result = await ingestReleaseImportBatch({ apply: true, batchPath, config, confirmBatchDigest: batch.digest }, { ingestManifest })
     expect(result).toEqual([{ replayed: true, url: `https://founder-ops.findmydoc.eu/team/platform-releases/${manifest.version}`, version: manifest.version }])
     expect(ingestManifest).toHaveBeenCalledTimes(1)
+  })
+
+  it('validates every stored manifest before the first remote write', async () => {
+    const releasePlan = await plan()
+    const manifest = buildReleaseImportManifest(releasePlan, content(), config)
+    const directory = await mkdtemp(join(tmpdir(), 'release-import-preflight-'))
+    const validDirectory = join(directory, manifest.version)
+    const invalidVersion = 'v0.44.0'
+    const invalidDirectory = join(directory, invalidVersion)
+    await import('node:fs/promises').then(({ mkdir }) => Promise.all([
+      mkdir(validDirectory, { recursive: true }),
+      mkdir(invalidDirectory, { recursive: true }),
+    ]))
+    await writeFile(join(validDirectory, 'platform-release.json'), serializeReleaseImportManifest(manifest), 'utf8')
+    const { manifestDigest: _manifestDigest, ...invalidWithoutDigest } = {
+      ...manifest,
+      components: manifest.components.map((component) => ({
+        ...component,
+        commits: component.commits.map((commit, index) => index === 0 ? { ...commit, message: 'x'.repeat(1_001) } : commit),
+      })),
+      version: invalidVersion,
+    }
+    const invalidManifest = {
+      ...invalidWithoutDigest,
+      manifestDigest: sha256(canonicalJson(invalidWithoutDigest)),
+    }
+    await writeFile(join(invalidDirectory, 'platform-release.json'), canonicalJson(invalidManifest), 'utf8')
+    const batch = createReleaseImportBatch([
+      { manifestDigest: manifest.manifestDigest, manifestPath: `${manifest.version}/platform-release.json`, version: manifest.version },
+      { manifestDigest: invalidManifest.manifestDigest, manifestPath: `${invalidVersion}/platform-release.json`, version: invalidVersion },
+    ])
+    const batchPath = join(directory, 'batch.json')
+    await writeFile(batchPath, `${JSON.stringify(batch, null, 2)}\n`, 'utf8')
+    const ingestManifest = vi.fn(async () => ({ replayed: false, url: 'https://founder-ops.findmydoc.eu/team/platform-releases/example' }))
+
+    await expect(ingestReleaseImportBatch({ apply: true, batchPath, config, confirmBatchDigest: batch.digest }, { ingestManifest }))
+      .rejects.toThrow()
+    expect(ingestManifest).not.toHaveBeenCalled()
+
+    const { manifestDigest: _secondManifestDigest, ...invalidTitleWithoutDigest } = {
+      ...manifest,
+      components: manifest.components.map((component) => ({
+        ...component,
+        pullRequests: component.pullRequests.map((pullRequest, index) => index === 0 ? { ...pullRequest, title: 42 } : pullRequest),
+      })),
+      version: invalidVersion,
+    }
+    const invalidTitleManifest = {
+      ...invalidTitleWithoutDigest,
+      manifestDigest: sha256(canonicalJson(invalidTitleWithoutDigest)),
+    }
+    await writeFile(join(invalidDirectory, 'platform-release.json'), canonicalJson(invalidTitleManifest), 'utf8')
+    const invalidTitleBatch = createReleaseImportBatch([
+      { manifestDigest: manifest.manifestDigest, manifestPath: `${manifest.version}/platform-release.json`, version: manifest.version },
+      { manifestDigest: invalidTitleManifest.manifestDigest, manifestPath: `${invalidVersion}/platform-release.json`, version: invalidVersion },
+    ])
+    await writeFile(batchPath, `${JSON.stringify(invalidTitleBatch, null, 2)}\n`, 'utf8')
+
+    await expect(ingestReleaseImportBatch({ apply: true, batchPath, config, confirmBatchDigest: invalidTitleBatch.digest }, { ingestManifest }))
+      .rejects.toThrow()
+    expect(ingestManifest).not.toHaveBeenCalled()
   })
 })
