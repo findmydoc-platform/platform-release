@@ -51,14 +51,20 @@ jobs:
 
       - name: Validate release inputs
         env:
+          DEPLOYMENT_COMMIT_SHA: ${{ inputs.target_sha }}
+          DEPLOYMENT_ENVIRONMENT: production
           PLAN_DIGEST: ${{ inputs.plan_digest }}
           PLATFORM_VERSION: ${{ inputs.platform_version }}
+          RELEASE_VERSION: ${{ inputs.platform_version }}
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           set -euo pipefail
+          test "$DEPLOYMENT_ENVIRONMENT" = "production"
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEPLOYMENT_COMMIT_SHA" = "$TARGET_SHA" ]]
           [[ "$PLAN_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           [[ "$PLATFORM_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$RELEASE_VERSION" = "$PLATFORM_VERSION" ]]
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -99,6 +105,10 @@ jobs:
         run: pnpm test:all
 
       - name: Build application
+        env:
+          DEPLOYMENT_COMMIT_SHA: ${{ inputs.target_sha }}
+          DEPLOYMENT_ENVIRONMENT: production
+          RELEASE_VERSION: ${{ inputs.platform_version }}
         run: pnpm build
 
       - name: Pull Vercel production settings
@@ -110,16 +120,26 @@ jobs:
 
       - name: Build Vercel production
         env:
+          DEPLOYMENT_COMMIT_SHA: ${{ inputs.target_sha }}
+          DEPLOYMENT_ENVIRONMENT: production
+          RELEASE_VERSION: ${{ inputs.platform_version }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: pnpm dlx "vercel@${VERCEL_CLI_VERSION}" build --prod
 
       - name: Deploy Vercel production
         env:
+          DEPLOYMENT_COMMIT_SHA: ${{ inputs.target_sha }}
+          DEPLOYMENT_ENVIRONMENT: production
+          RELEASE_VERSION: ${{ inputs.platform_version }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        run: pnpm dlx "vercel@${VERCEL_CLI_VERSION}" deploy --prebuilt --prod --yes --token="$VERCEL_TOKEN"
+        run: >-
+          pnpm dlx "vercel@${VERCEL_CLI_VERSION}" deploy --prebuilt --prod --yes --token="$VERCEL_TOKEN"
+          --env "DEPLOYMENT_ENVIRONMENT=$DEPLOYMENT_ENVIRONMENT"
+          --env "DEPLOYMENT_COMMIT_SHA=$DEPLOYMENT_COMMIT_SHA"
+          --env "RELEASE_VERSION=$RELEASE_VERSION"
 
   deployment-disabled:
     name: Production disabled

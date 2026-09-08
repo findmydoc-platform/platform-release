@@ -3,6 +3,19 @@ import { describe, expect, it } from 'vitest'
 
 const readWorkflow = (name: string) => readFile(new URL(`../../.github/workflows/${name}`, import.meta.url), 'utf8')
 
+const readNamedStep = (workflow: string, name: string): string => {
+  const marker = `      - name: ${name}\n`
+  const start = workflow.indexOf(marker)
+  expect(start).toBeGreaterThan(-1)
+
+  const followingNamedStep = workflow.indexOf('\n      - name:', start + marker.length)
+  const followingActionStep = workflow.indexOf('\n      - uses:', start + marker.length)
+  const candidates = [followingNamedStep, followingActionStep].filter((index) => index >= 0)
+  const end = candidates.length > 0 ? Math.min(...candidates) : workflow.length
+
+  return workflow.slice(start, end)
+}
+
 describe('platform release workflows', () => {
   it('keeps plan as the default and requires explicit apply inputs', async () => {
     const workflow = await readWorkflow('platform-release.yml')
@@ -63,20 +76,50 @@ describe('platform release workflows', () => {
   it.each([
     'reusable-deploy-dashboard.yml',
     'reusable-deploy-website.yml',
-  ])('checks out and validates the exact frozen SHA in %s', async (name) => {
+  ])('checks out, validates, and injects the exact frozen deployment contract in %s', async (name) => {
     const workflow = await readWorkflow(name)
     expect(workflow).toContain('ref: ${{ inputs.target_sha }}')
     expect(workflow).toContain('persist-credentials: false')
     expect(workflow).toContain('git merge-base --is-ancestor "$TARGET_SHA" origin/main')
+    expect(workflow).toContain('DEPLOYMENT_COMMIT_SHA: ${{ inputs.target_sha }}')
+    expect(workflow).toContain('DEPLOYMENT_ENVIRONMENT: production')
     expect(workflow).toContain('PLAN_DIGEST: ${{ inputs.plan_digest }}')
+    expect(workflow).toContain('RELEASE_VERSION: ${{ inputs.platform_version }}')
+    expect(workflow).toContain('[[ "$DEPLOYMENT_COMMIT_SHA" = "$TARGET_SHA" ]]')
+    expect(workflow).toContain('[[ "$RELEASE_VERSION" = "$PLATFORM_VERSION" ]]')
     expect(workflow).toContain('test "$DEPLOY_REF" = "refs/heads/main"')
   })
+
+  it('injects the frozen production contract into the website deployment boundary', async () => {
+    const workflow = await readWorkflow('reusable-deploy-website.yml')
+    const deployStep = readNamedStep(workflow, 'Deploy Vercel production')
+
+    expect(deployStep).toContain('DEPLOYMENT_COMMIT_SHA: ${{ inputs.target_sha }}')
+    expect(deployStep).toContain('DEPLOYMENT_ENVIRONMENT: production')
+    expect(deployStep).toContain('RELEASE_VERSION: ${{ inputs.platform_version }}')
+    expect(deployStep).toContain('run: bash ./.github/scripts/deploy/vercel-deploy.sh production')
+  })
+
+  it.each(['Build application', 'Build Vercel production', 'Deploy Vercel production'])(
+    'injects the frozen dashboard contract into the %s step',
+    async (stepName) => {
+      const workflow = await readWorkflow('reusable-deploy-dashboard.yml')
+      const step = readNamedStep(workflow, stepName)
+
+      expect(step).toContain('DEPLOYMENT_COMMIT_SHA: ${{ inputs.target_sha }}')
+      expect(step).toContain('DEPLOYMENT_ENVIRONMENT: production')
+      expect(step).toContain('RELEASE_VERSION: ${{ inputs.platform_version }}')
+    },
+  )
 
   it('preserves the dashboard production validation depth', async () => {
     const workflow = await readWorkflow('reusable-deploy-dashboard.yml')
     expect(workflow).toContain('pnpm exec playwright install --with-deps chromium')
     expect(workflow).toContain('pnpm test:all')
     expect(workflow).toContain('pull --yes --environment=production --token="$VERCEL_TOKEN"')
+    expect(workflow).toContain('--env "DEPLOYMENT_ENVIRONMENT=$DEPLOYMENT_ENVIRONMENT"')
+    expect(workflow).toContain('--env "DEPLOYMENT_COMMIT_SHA=$DEPLOYMENT_COMMIT_SHA"')
+    expect(workflow).toContain('--env "RELEASE_VERSION=$RELEASE_VERSION"')
     expect(workflow).not.toContain('--environment=production --git-branch')
   })
 })
