@@ -118,6 +118,41 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: pnpm dlx "vercel@${VERCEL_CLI_VERSION}" pull --yes --environment=production --token="$VERCEL_TOKEN"
 
+      - name: Prepare platform Vercel helper
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/dashboard-vercel-deployment.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          operation="${1:-}"
+          target="${2:-}"
+
+          test "$target" = "production"
+          test "${DEPLOYMENT_ENVIRONMENT:-}" = "$target"
+          [[ "${DEPLOYMENT_COMMIT_SHA:-}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RELEASE_VERSION:-}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test -n "${VERCEL_CLI_VERSION:-}"
+
+          case "$operation" in
+            build)
+              exec pnpm dlx "vercel@${VERCEL_CLI_VERSION}" build --prod
+              ;;
+            deploy)
+              test -n "${VERCEL_TOKEN:-}"
+              exec pnpm dlx "vercel@${VERCEL_CLI_VERSION}" deploy --prebuilt --prod --yes --token="$VERCEL_TOKEN" \
+                --env "DEPLOYMENT_ENVIRONMENT=$DEPLOYMENT_ENVIRONMENT" \
+                --env "DEPLOYMENT_COMMIT_SHA=$DEPLOYMENT_COMMIT_SHA" \
+                --env "RELEASE_VERSION=$RELEASE_VERSION"
+              ;;
+            *)
+              echo "Unsupported Vercel operation '$operation'." >&2
+              exit 1
+              ;;
+          esac
+          EOF
+          chmod 700 "$RUNNER_TEMP/dashboard-vercel-deployment.sh"
+
       - name: Build Vercel production
         env:
           DEPLOYMENT_COMMIT_SHA: ${{ inputs.target_sha }}
@@ -125,7 +160,7 @@ jobs:
           RELEASE_VERSION: ${{ inputs.platform_version }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-        run: pnpm dlx "vercel@${VERCEL_CLI_VERSION}" build --prod
+        run: '"$RUNNER_TEMP/dashboard-vercel-deployment.sh" build production'
 
       - name: Deploy Vercel production
         env:
@@ -135,11 +170,7 @@ jobs:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        run: >-
-          pnpm dlx "vercel@${VERCEL_CLI_VERSION}" deploy --prebuilt --prod --yes --token="$VERCEL_TOKEN"
-          --env "DEPLOYMENT_ENVIRONMENT=$DEPLOYMENT_ENVIRONMENT"
-          --env "DEPLOYMENT_COMMIT_SHA=$DEPLOYMENT_COMMIT_SHA"
-          --env "RELEASE_VERSION=$RELEASE_VERSION"
+        run: '"$RUNNER_TEMP/dashboard-vercel-deployment.sh" deploy production'
 
   deployment-disabled:
     name: Production disabled
