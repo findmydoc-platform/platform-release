@@ -315,8 +315,6 @@ describe("platform release workflows", () => {
 
     expectFrozenProductionContract(deploy);
     expectVercelToken(deploy);
-    expect(deploy.run).toBe(
-      "bash ./.github/scripts/deploy/vercel-deploy.sh production",
-    );
+    expect(deploy.run).toContain("deploy --prebuilt --prod --yes");
   });
 });

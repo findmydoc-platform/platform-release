@@ -6,6 +6,13 @@ This repository contains only the deterministic release engine, reusable deploym
 
 Internal operating documentation is maintained in the Operations repository.
 
+## Website package access
+
+The Website reusable deployment workflow requires the caller secret `GH_PACKAGES_READ_TOKEN` with private package read access.
+It exposes that credential as `NODE_AUTH_TOKEN` only while the runner installs and builds the frozen Website checkout through
+`vercel build --prod`. The upload uses the prebuilt output; upload, alias, and runtime configuration do not receive the package token.
+Callers keep the token in GitHub Actions secrets and must not add it to a Vercel project environment variable.
+
 ## Release manifests
 
 - Manifest v2 remains readable for existing joint releases.
