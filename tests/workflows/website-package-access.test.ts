@@ -12,6 +12,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
 type Step = {
+  readonly uses?: string;
+  readonly with?: Record<string, unknown>;
   readonly name?: string;
   readonly env?: Record<string, string>;
   readonly run?: string;
@@ -152,6 +154,27 @@ afterEach(() => {
 });
 
 describe("Website package-read credential boundary", () => {
+  it("never restores or saves the private package through Actions caches", () => {
+    const pnpmSteps = workflow.jobs.deploy.steps.filter((step) =>
+      step.uses?.startsWith("pnpm/action-setup@"),
+    );
+    expect(pnpmSteps).not.toHaveLength(0);
+    for (const step of pnpmSteps) expect(step.with?.cache).toBe(false);
+    const setupSteps = workflow.jobs.deploy.steps.filter((step) =>
+      step.uses?.startsWith("actions/setup-node@"),
+    );
+    expect(setupSteps).not.toHaveLength(0);
+    for (const step of setupSteps) {
+      expect(step.with?.cache).toBeUndefined();
+      expect(step.with?.["package-manager-cache"]).toBe(false);
+    }
+    expect(
+      workflow.jobs.deploy.steps.filter((step) =>
+        /^actions\/cache(?:\/(?:restore|save))?@/.test(step.uses ?? ""),
+      ),
+    ).toHaveLength(0);
+  });
+
   it("requires the caller secret and makes it available only to the Website build", () => {
     expect(workflow.on.workflow_call.secrets.GH_PACKAGES_READ_TOKEN).toEqual({
       required: true,

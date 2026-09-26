@@ -12,6 +12,8 @@ The Website reusable deployment workflow requires the caller secret `GH_PACKAGES
 It exposes that credential as `NODE_AUTH_TOKEN` only while the runner installs and builds the frozen Website checkout through
 `vercel build --prod`. The upload uses the prebuilt output; upload, alias, and runtime configuration do not receive the package token.
 Callers keep the token in GitHub Actions secrets and must not add it to a Vercel project environment variable.
+The Website workflow disables package-manager caching and uses no Actions cache for its install or build output.
+Fork pull requests can read default-branch Actions caches, so private package files must never enter those caches.
 
 ## Release manifests
 
