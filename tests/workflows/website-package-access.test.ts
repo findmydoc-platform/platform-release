@@ -45,9 +45,11 @@ const workflow = parse(
 ) as Workflow;
 const temporaryDirectories = new Set<string>();
 const packageToken = "synthetic-package-read-token";
+const databaseDirectUri = "synthetic-database-direct-uri";
 const context: Record<string, string> = {
   "inputs.target_sha": "a".repeat(40),
   "inputs.platform_version": "v1.2.3",
+  "secrets.DATABASE_DIRECT_URI": databaseDirectUri,
   "secrets.GH_PACKAGES_READ_TOKEN": packageToken,
   "secrets.PAYLOAD_SECRET": "synthetic-payload-secret",
   "secrets.VERCEL_ORG_ID": "team_test",
@@ -80,8 +82,10 @@ const runStep = (
     "exit 0\n",
   );
   const commandLog = path.join(directory, "commands.jsonl");
+  const directUriPresenceLog = path.join(directory, "direct-uri-presence.log");
   const githubOutput = path.join(directory, "github-output");
   writeFileSync(commandLog, "");
+  writeFileSync(directUriPresenceLog, "");
   writeFileSync(githubOutput, "");
   writeFileSync(
     path.join(bin, "pnpm"),
@@ -90,6 +94,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 const log = process.env.COMMAND_LOG;
 fs.appendFileSync(log, JSON.stringify({ args, packageTokenPresent: Boolean(process.env.NODE_AUTH_TOKEN) }) + "\\n");
+fs.appendFileSync(process.env.DIRECT_URI_PRESENCE_LOG, (process.env.DATABASE_DIRECT_URI ? "present" : "absent") + "\\n");
 if (args.includes("deploy")) {
   const attempts = fs.readFileSync(log, "utf8").trim().split("\\n").length;
   if (attempts <= Number(process.env.STUB_FAILURES)) {
@@ -127,10 +132,12 @@ if (args.includes("deploy")) {
       env: {
         ...process.env,
         NODE_AUTH_TOKEN: undefined,
+        DATABASE_DIRECT_URI: undefined,
         GH_PACKAGES_READ_TOKEN: undefined,
         ...resolvedEnvironment,
         ...(options.packageAccess === false ? { NODE_AUTH_TOKEN: "" } : {}),
         COMMAND_LOG: commandLog,
+        DIRECT_URI_PRESENCE_LOG: directUriPresenceLog,
         GITHUB_OUTPUT: githubOutput,
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         STUB_FAILURES: String(options.failures ?? 0),
@@ -144,7 +151,15 @@ if (args.includes("deploy")) {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as Invocation);
-  return { result, invocations, output: readFileSync(githubOutput, "utf8") };
+  return {
+    result,
+    invocations,
+    directUriPresence: readFileSync(directUriPresenceLog, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean),
+    output: readFileSync(githubOutput, "utf8"),
+  };
 };
 
 afterEach(() => {
@@ -215,6 +230,54 @@ describe("Website package-read credential boundary", () => {
     expect(build.result.stderr).toContain(
       "GH_PACKAGES_READ_TOKEN is required for the Website build.",
     );
+  });
+
+  it("keeps the migration URI in the build step and out of Vercel output", () => {
+    const build = namedStep("Build Vercel production");
+    const deploy = namedStep("Deploy Vercel production");
+    const alias = namedStep("Set production alias");
+
+    expect(workflow.on.workflow_call.secrets.DATABASE_DIRECT_URI).toBeUndefined();
+    expect(workflow.env?.DATABASE_DIRECT_URI).toBeUndefined();
+    expect(workflow.jobs.deploy.env?.DATABASE_DIRECT_URI).toBeUndefined();
+    expect(build.env?.DATABASE_DIRECT_URI).toBe(
+      "${{ secrets.DATABASE_DIRECT_URI }}",
+    );
+    expect(deploy.env?.DATABASE_DIRECT_URI).toBeUndefined();
+    expect(alias.env?.DATABASE_DIRECT_URI).toBeUndefined();
+    expect(
+      workflow.jobs.deploy.steps.filter((step) =>
+        Object.hasOwn(step.env ?? {}, "DATABASE_DIRECT_URI"),
+      ),
+    ).toEqual([build]);
+    const nonBuildConfiguration = {
+      env: workflow.env,
+      jobEnv: workflow.jobs.deploy.env,
+      callerSecrets: workflow.on.workflow_call.secrets,
+      steps: workflow.jobs.deploy.steps.filter((step) => step !== build),
+    };
+    expect(JSON.stringify(nonBuildConfiguration)).not.toContain(
+      "DATABASE_DIRECT_URI",
+    );
+
+    const buildRun = runStep(build);
+    const deployRun = runStep(deploy);
+    const aliasRun = runStep(alias);
+
+    expect(buildRun.result.status).toBe(0);
+    expect(buildRun.directUriPresence).toEqual(["present"]);
+    expect(deployRun.directUriPresence).toEqual(["absent"]);
+    expect(aliasRun.directUriPresence).toEqual(["absent"]);
+
+    for (const run of [buildRun, deployRun, aliasRun]) {
+      const output = [
+        run.result.stdout,
+        run.result.stderr,
+        run.output,
+        JSON.stringify(run.invocations),
+      ].join("\n");
+      expect(output).not.toContain(databaseDirectUri);
+    }
   });
 
   it("uploads prebuilt output with release metadata and without the package credential", () => {

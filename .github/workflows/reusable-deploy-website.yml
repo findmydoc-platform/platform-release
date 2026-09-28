@@ -109,6 +109,7 @@ jobs:
         env:
           DEPLOYMENT_COMMIT_SHA: ${{ inputs.target_sha }}
           DEPLOYMENT_ENVIRONMENT: production
+          DATABASE_DIRECT_URI: ${{ secrets.DATABASE_DIRECT_URI }}
           NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_READ_TOKEN }}
           PAYLOAD_SECRET: ${{ secrets.PAYLOAD_SECRET }}
           RELEASE_VERSION: ${{ inputs.platform_version }}

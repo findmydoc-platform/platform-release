@@ -1,0 +1,5 @@
+paths:
+  .github/workflows/reusable-deploy-website.yml:
+    ignore:
+      # GitHub supplies this Production environment secret at runtime; actionlint only sees declared workflow_call secrets.
+      - '^property "database_direct_uri" is not defined in object type \{.*\}$'
