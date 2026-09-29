@@ -186,7 +186,7 @@ describe("platform release workflows", () => {
       "permission-actions": "write",
       "permission-contents": "write",
       "permission-pull-requests": "read",
-      repositories: "website\nclinic-dashboard\n",
+      repositories: "ops\nwebsite\nclinic-dashboard\n",
     });
     expect(provenance.env).toMatchObject({
       CURRENT_SHA: "${{ github.sha }}",
