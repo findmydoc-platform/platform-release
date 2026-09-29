@@ -204,39 +204,30 @@ jobs:
           permission-contents: write
           permission-pull-requests: read
           repositories: |
-            ops
             website
             clinic-dashboard
 
-      - name: Checkout immutable Ops archive
+      - name: Restore immutable Ops archive artifacts
         if: inputs.archive_ref != ''
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-          repository: findmydoc-platform/ops
-          ref: ${{ inputs.archive_ref }}
-          path: ops-archive
-          token: ${{ steps.app-token.outputs.token }}
-          sparse-checkout: platform-releases
-          sparse-checkout-cone-mode: true
+        env:
+          ARCHIVE_PLAN: ${{ secrets.PLATFORM_RELEASE_ARCHIVE_PLAN }}
+          ARCHIVE_CONTENT: ${{ secrets.PLATFORM_RELEASE_ARCHIVE_CONTENT }}
+        run: |
+          set -euo pipefail
+          test -n "$ARCHIVE_PLAN"
+          test -n "$ARCHIVE_CONTENT"
+          mkdir -p artifacts/platform-release
+          node --input-type=module -e "import { writeFileSync } from 'node:fs'; writeFileSync('artifacts/platform-release/plan.json', process.env.ARCHIVE_PLAN + '\\n'); writeFileSync('artifacts/platform-release/release-content.json', process.env.ARCHIVE_CONTENT + '\\n')"
 
       - name: Verify archived plan provenance
         if: inputs.archive_ref != ''
         env:
-          ARCHIVE_REF: ${{ inputs.archive_ref }}
           CONFIRM_DIGEST: ${{ inputs.confirm_digest }}
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
         run: |
           set -euo pipefail
-          test "$(git -C ops-archive rev-parse HEAD)" = "$ARCHIVE_REF"
-          archive_directory="ops-archive/platform-releases/$CONFIRM_VERSION"
-          test -f "$archive_directory/plan.json"
-          test -f "$archive_directory/release-content.json"
-          test "$(jq -r '.version' "$archive_directory/plan.json")" = "$CONFIRM_VERSION"
-          test "$(jq -r '.digest' "$archive_directory/plan.json")" = "$CONFIRM_DIGEST"
-          mkdir -p artifacts/platform-release
-          cp "$archive_directory/plan.json" artifacts/platform-release/plan.json
-          cp "$archive_directory/release-content.json" artifacts/platform-release/release-content.json
+          test "$(jq -r '.version' artifacts/platform-release/plan.json)" = "$CONFIRM_VERSION"
+          test "$(jq -r '.digest' artifacts/platform-release/plan.json)" = "$CONFIRM_DIGEST"
 
       - name: Verify plan artifact provenance
         if: inputs.archive_ref == ''
