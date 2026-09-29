@@ -13,6 +13,8 @@ on:
         required: true
         type: string
     secrets:
+      DATABASE_DIRECT_URI:
+        required: true
       GH_PACKAGES_READ_TOKEN:
         required: true
       PAYLOAD_SECRET:
@@ -120,6 +122,10 @@ jobs:
           set -euo pipefail
           if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
             echo "GH_PACKAGES_READ_TOKEN is required for the Website build." >&2
+            exit 1
+          fi
+          if [[ -z "${DATABASE_DIRECT_URI:-}" ]]; then
+            echo "DATABASE_DIRECT_URI is required for the Website build." >&2
             exit 1
           fi
           bash ./.github/scripts/deploy/assert-vercel-project-binding.sh
