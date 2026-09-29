@@ -23,6 +23,7 @@ type GitHubRelease = {
   html_url?: string
   id?: number
   immutable?: boolean
+  name?: string
   published_at?: string | null
   prerelease?: boolean
   draft?: boolean
@@ -261,12 +262,26 @@ function releaseUrl(repository: string, version: string): string {
   return `https://github.com/${repository}/releases/tag/${encodeURIComponent(version)}`
 }
 
+function isVersionReleaseCandidate(release: GitHubRelease, version: string): boolean {
+  return release.tag_name === version || (
+    release.draft === true &&
+    release.name === `findmydoc ${version}` &&
+    /^untagged-[0-9a-f]+$/.test(release.tag_name ?? '')
+  )
+}
+
+export function selectReleaseIncludingDraft(releases: readonly GitHubRelease[], version: string): GitHubRelease | undefined {
+  const candidates = releases.filter((release) => isVersionReleaseCandidate(release, version))
+  if (candidates.length > 1) throw new Error(`Multiple GitHub releases match ${version}; manual inspection is required.`)
+  return candidates[0]
+}
+
 async function findReleaseIncludingDraft(repository: string, version: string): Promise<GitHubRelease | undefined> {
+  const candidates: GitHubRelease[] = []
   for (let page = 1; ; page += 1) {
     const releases = await api<GitHubRelease[]>(`repos/${repository}/releases?per_page=100&page=${page}`)
-    const release = releases.find((candidate) => candidate.tag_name === version)
-    if (release) return release
-    if (releases.length < 100) return undefined
+    candidates.push(...releases.filter((release) => isVersionReleaseCandidate(release, version)))
+    if (releases.length < 100) return selectReleaseIncludingDraft(candidates, version)
   }
 }
 
@@ -616,13 +631,36 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   async publishRelease(input: {
     releaseId: number
     repository: string
+    targetSha: string
     version: string
   }): Promise<PlatformReleaseDetails> {
-    const release = await api<GitHubRelease>(`repos/${input.repository}/releases/${input.releaseId}`, {
+    const releasePath = `repos/${input.repository}/releases/${input.releaseId}`
+    const current = await api<GitHubRelease>(releasePath)
+    if (current.draft !== true || current.name !== `findmydoc ${input.version}` ||
+      current.target_commitish !== input.targetSha || !isVersionReleaseCandidate(current, input.version)) {
+      throw new Error(`${input.repository} ${input.version} draft identity changed before publication.`)
+    }
+    if (current.tag_name !== input.version) {
+      const retagged = await api<GitHubRelease>(releasePath, {
+        body: { tag_name: input.version, target_commitish: input.targetSha },
+        method: 'PATCH',
+      })
+      if (retagged.draft !== true || retagged.tag_name !== input.version ||
+        retagged.target_commitish !== input.targetSha) {
+        throw new Error(`GitHub did not bind ${input.repository} draft to ${input.version}.`)
+      }
+    }
+    const release = await api<GitHubRelease>(releasePath, {
       body: { draft: false },
       method: 'PATCH',
     })
+    if (release.tag_name !== input.version) {
+      throw new Error(`GitHub published ${input.repository} with an unexpected tag.`)
+    }
     const details = await platformReleaseDetails(input.repository, input.version, release)
+    if (details.sha !== input.targetSha) {
+      throw new Error(`${input.repository} tag ${input.version} points to ${details.sha}, not ${input.targetSha}.`)
+    }
     if (details.draft || !details.publishedAt) {
       throw new Error(`GitHub did not publish ${input.repository} ${input.version}.`)
     }
@@ -692,7 +730,7 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     try {
       await writeFile(path, input.manifest, 'utf8')
       try {
-        await runGh(['release', 'upload', input.version, path, '--repo', input.repository])
+        await runGh(['release', 'upload', release.tag_name ?? input.version, path, '--repo', input.repository])
       } catch (error) {
         const detail = safeGhErrorDetail(error)
         throw new Error(
