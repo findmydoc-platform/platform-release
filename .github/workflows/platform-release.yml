@@ -22,6 +22,10 @@ on:
         description: Plan workflow run ID required for apply mode
         required: false
         type: string
+      archive_ref:
+        description: Immutable Ops archive commit for resuming an archived apply
+        required: false
+        type: string
       confirm_version:
         description: Exact vX.Y.Z confirmation required for apply mode
         required: false
@@ -163,15 +167,21 @@ jobs:
           CONFIRM_DIGEST: ${{ inputs.confirm_digest }}
           CONFIRM_CONTENT_DIGEST: ${{ inputs.confirm_content_digest }}
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
+          ARCHIVE_REF: ${{ inputs.archive_ref }}
           PLAN_RUN_ID: ${{ inputs.plan_run_id }}
           RELEASE_CONTENT: ${{ inputs.release_content }}
         run: |
           set -euo pipefail
-          [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]]
+          if [[ -n "$ARCHIVE_REF" ]]; then
+            [[ "$ARCHIVE_REF" =~ ^[0-9a-f]{40}$ ]]
+            test -z "$PLAN_RUN_ID"
+          else
+            [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]]
+            test -n "$RELEASE_CONTENT"
+          fi
           [[ "$CONFIRM_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CONFIRM_CONTENT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CONFIRM_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          test -n "$RELEASE_CONTENT"
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -197,7 +207,37 @@ jobs:
             website
             clinic-dashboard
 
+      - name: Checkout immutable Ops archive
+        if: inputs.archive_ref != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          repository: findmydoc-platform/ops
+          ref: ${{ inputs.archive_ref }}
+          path: ops-archive
+          sparse-checkout: platform-releases
+          sparse-checkout-cone-mode: true
+
+      - name: Verify archived plan provenance
+        if: inputs.archive_ref != ''
+        env:
+          ARCHIVE_REF: ${{ inputs.archive_ref }}
+          CONFIRM_DIGEST: ${{ inputs.confirm_digest }}
+          CONFIRM_VERSION: ${{ inputs.confirm_version }}
+        run: |
+          set -euo pipefail
+          test "$(git -C ops-archive rev-parse HEAD)" = "$ARCHIVE_REF"
+          archive_directory="ops-archive/platform-releases/$CONFIRM_VERSION"
+          test -f "$archive_directory/plan.json"
+          test -f "$archive_directory/release-content.json"
+          test "$(jq -r '.version' "$archive_directory/plan.json")" = "$CONFIRM_VERSION"
+          test "$(jq -r '.digest' "$archive_directory/plan.json")" = "$CONFIRM_DIGEST"
+          mkdir -p artifacts/platform-release
+          cp "$archive_directory/plan.json" artifacts/platform-release/plan.json
+          cp "$archive_directory/release-content.json" artifacts/platform-release/release-content.json
+
       - name: Verify plan artifact provenance
+        if: inputs.archive_ref == ''
         env:
           CURRENT_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
@@ -228,6 +268,7 @@ jobs:
           esac
 
       - name: Download frozen plan
+        if: inputs.archive_ref == ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           github-token: ${{ github.token }}
@@ -236,6 +277,7 @@ jobs:
           run-id: ${{ inputs.plan_run_id }}
 
       - name: Write approved release content
+        if: inputs.archive_ref == ''
         env:
           RELEASE_CONTENT: ${{ inputs.release_content }}
         run: node --input-type=module -e "import { writeFileSync } from 'node:fs'; writeFileSync('artifacts/platform-release/release-content.json', process.env.RELEASE_CONTENT + '\n')"
