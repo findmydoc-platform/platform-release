@@ -67,7 +67,12 @@ const namedStep = (name: string): Step => {
 
 const runStep = (
   step: Step,
-  options: { failures?: number; error?: string; packageAccess?: boolean } = {},
+  options: {
+    failures?: number;
+    error?: string;
+    packageAccess?: boolean;
+    databaseUri?: boolean;
+  } = {},
 ) => {
   const directory = mkdtempSync(
     path.join(os.tmpdir(), "website-package-access-"),
@@ -136,6 +141,7 @@ if (args.includes("deploy")) {
         GH_PACKAGES_READ_TOKEN: undefined,
         ...resolvedEnvironment,
         ...(options.packageAccess === false ? { NODE_AUTH_TOKEN: "" } : {}),
+        ...(options.databaseUri === false ? { DATABASE_DIRECT_URI: "" } : {}),
         COMMAND_LOG: commandLog,
         DIRECT_URI_PRESENCE_LOG: directUriPresenceLog,
         GITHUB_OUTPUT: githubOutput,
@@ -232,12 +238,14 @@ describe("Website package-read credential boundary", () => {
     );
   });
 
-  it("keeps the migration URI in the build step and out of Vercel output", () => {
+  it("requires the migration URI and keeps it scoped to the Website build", () => {
     const build = namedStep("Build Vercel production");
     const deploy = namedStep("Deploy Vercel production");
     const alias = namedStep("Set production alias");
 
-    expect(workflow.on.workflow_call.secrets.DATABASE_DIRECT_URI).toBeUndefined();
+    expect(workflow.on.workflow_call.secrets.DATABASE_DIRECT_URI).toEqual({
+      required: true,
+    });
     expect(workflow.env?.DATABASE_DIRECT_URI).toBeUndefined();
     expect(workflow.jobs.deploy.env?.DATABASE_DIRECT_URI).toBeUndefined();
     expect(build.env?.DATABASE_DIRECT_URI).toBe(
@@ -253,7 +261,6 @@ describe("Website package-read credential boundary", () => {
     const nonBuildConfiguration = {
       env: workflow.env,
       jobEnv: workflow.jobs.deploy.env,
-      callerSecrets: workflow.on.workflow_call.secrets,
       steps: workflow.jobs.deploy.steps.filter((step) => step !== build),
     };
     expect(JSON.stringify(nonBuildConfiguration)).not.toContain(
@@ -278,6 +285,17 @@ describe("Website package-read credential boundary", () => {
       ].join("\n");
       expect(output).not.toContain(databaseDirectUri);
     }
+  });
+
+  it("fails before Vercel when the migration URI is empty", () => {
+    const build = runStep(namedStep("Build Vercel production"), {
+      databaseUri: false,
+    });
+    expect(build.result.status).toBe(1);
+    expect(build.invocations).toEqual([]);
+    expect(build.result.stderr).toContain(
+      "DATABASE_DIRECT_URI is required for the Website build.",
+    );
   });
 
   it("uploads prebuilt output with release metadata and without the package credential", () => {
