@@ -13,6 +13,8 @@ on:
         required: true
         type: string
     secrets:
+      DATABASE_CA_CERT:
+        required: true
       DATABASE_DIRECT_URI:
         required: true
       GH_PACKAGES_READ_TOKEN:
@@ -111,6 +113,7 @@ jobs:
         env:
           DEPLOYMENT_COMMIT_SHA: ${{ inputs.target_sha }}
           DEPLOYMENT_ENVIRONMENT: production
+          DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
           DATABASE_DIRECT_URI: ${{ secrets.DATABASE_DIRECT_URI }}
           NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_READ_TOKEN }}
           PAYLOAD_SECRET: ${{ secrets.PAYLOAD_SECRET }}
@@ -128,6 +131,19 @@ jobs:
             echo "DATABASE_DIRECT_URI is required for the Website build." >&2
             exit 1
           fi
+          if [[ -z "${DATABASE_CA_CERT:-}" ]]; then
+            echo "DATABASE_CA_CERT is required for the Website build." >&2
+            exit 1
+          fi
+          ca_file="$(mktemp "$RUNNER_TEMP/production-db-ca.XXXXXX")"
+          trap 'rm -f "$ca_file"' EXIT
+          printf '%s\n' "$DATABASE_CA_CERT" > "$ca_file"
+          unset DATABASE_CA_CERT
+          if [[ "$(openssl x509 -in "$ca_file" -noout -fingerprint -sha256)" != "sha256 Fingerprint=80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA" ]]; then
+            echo "Unexpected production database CA certificate." >&2
+            exit 1
+          fi
+          export NODE_EXTRA_CA_CERTS="$ca_file"
           bash ./.github/scripts/deploy/assert-vercel-project-binding.sh
           pnpm dlx vercel@canary build --prod --yes
 

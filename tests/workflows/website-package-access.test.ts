@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -45,10 +46,12 @@ const workflow = parse(
 ) as Workflow;
 const temporaryDirectories = new Set<string>();
 const packageToken = "synthetic-package-read-token";
+const databaseCaCert = "synthetic-database-ca-certificate";
 const databaseDirectUri = "synthetic-database-direct-uri";
 const context: Record<string, string> = {
   "inputs.target_sha": "a".repeat(40),
   "inputs.platform_version": "v1.2.3",
+  "secrets.DATABASE_CA_CERT": databaseCaCert,
   "secrets.DATABASE_DIRECT_URI": databaseDirectUri,
   "secrets.GH_PACKAGES_READ_TOKEN": packageToken,
   "secrets.PAYLOAD_SECRET": "synthetic-payload-secret",
@@ -71,6 +74,7 @@ const runStep = (
     failures?: number;
     error?: string;
     packageAccess?: boolean;
+    databaseCaCert?: "missing" | "wrong";
     databaseUri?: boolean;
   } = {},
 ) => {
@@ -88,9 +92,11 @@ const runStep = (
   );
   const commandLog = path.join(directory, "commands.jsonl");
   const directUriPresenceLog = path.join(directory, "direct-uri-presence.log");
+  const caTrustPresenceLog = path.join(directory, "ca-trust-presence.log");
   const githubOutput = path.join(directory, "github-output");
   writeFileSync(commandLog, "");
   writeFileSync(directUriPresenceLog, "");
+  writeFileSync(caTrustPresenceLog, "");
   writeFileSync(githubOutput, "");
   writeFileSync(
     path.join(bin, "pnpm"),
@@ -100,6 +106,7 @@ const args = process.argv.slice(2);
 const log = process.env.COMMAND_LOG;
 fs.appendFileSync(log, JSON.stringify({ args, packageTokenPresent: Boolean(process.env.NODE_AUTH_TOKEN) }) + "\\n");
 fs.appendFileSync(process.env.DIRECT_URI_PRESENCE_LOG, (process.env.DATABASE_DIRECT_URI ? "present" : "absent") + "\\n");
+fs.appendFileSync(process.env.CA_TRUST_PRESENCE_LOG, (process.env.NODE_EXTRA_CA_CERTS && fs.readFileSync(process.env.NODE_EXTRA_CA_CERTS, "utf8").trim() === process.env.STUB_CA_CERT ? "present" : "absent") + "\\n");
 if (args.includes("deploy")) {
   const attempts = fs.readFileSync(log, "utf8").trim().split("\\n").length;
   if (attempts <= Number(process.env.STUB_FAILURES)) {
@@ -108,6 +115,18 @@ if (args.includes("deploy")) {
   }
   console.log("https://website-release-test.vercel.app");
 }
+`,
+    { mode: 0o700 },
+  );
+  writeFileSync(
+    path.join(bin, "openssl"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$(cat "$3")" == "$STUB_CA_CERT" ]]; then
+  printf '%s\\n' 'sha256 Fingerprint=80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA'
+else
+  printf '%s\\n' 'sha256 Fingerprint=00:00:00:00'
+fi
 `,
     { mode: 0o700 },
   );
@@ -137,18 +156,28 @@ if (args.includes("deploy")) {
       env: {
         ...process.env,
         NODE_AUTH_TOKEN: undefined,
+        NODE_EXTRA_CA_CERTS: undefined,
+        DATABASE_CA_CERT: undefined,
         DATABASE_DIRECT_URI: undefined,
         GH_PACKAGES_READ_TOKEN: undefined,
         ...resolvedEnvironment,
         ...(options.packageAccess === false ? { NODE_AUTH_TOKEN: "" } : {}),
+        ...(options.databaseCaCert === "missing"
+          ? { DATABASE_CA_CERT: "" }
+          : options.databaseCaCert === "wrong"
+            ? { DATABASE_CA_CERT: "wrong-certificate" }
+            : {}),
         ...(options.databaseUri === false ? { DATABASE_DIRECT_URI: "" } : {}),
+        CA_TRUST_PRESENCE_LOG: caTrustPresenceLog,
         COMMAND_LOG: commandLog,
         DIRECT_URI_PRESENCE_LOG: directUriPresenceLog,
         GITHUB_OUTPUT: githubOutput,
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         STUB_FAILURES: String(options.failures ?? 0),
         STUB_ERROR: options.error ?? "Internal error, please try again",
+        STUB_CA_CERT: databaseCaCert,
         TMPDIR: directory,
+        RUNNER_TEMP: directory,
       },
     },
   );
@@ -164,6 +193,13 @@ if (args.includes("deploy")) {
       .trim()
       .split("\n")
       .filter(Boolean),
+    caTrustPresence: readFileSync(caTrustPresenceLog, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean),
+    caFilesRemaining: readdirSync(directory).filter((name) =>
+      name.startsWith("production-db-ca."),
+    ),
     output: readFileSync(githubOutput, "utf8"),
   };
 };
@@ -273,8 +309,12 @@ describe("Website package-read credential boundary", () => {
 
     expect(buildRun.result.status).toBe(0);
     expect(buildRun.directUriPresence).toEqual(["present"]);
+    expect(buildRun.caTrustPresence).toEqual(["present"]);
+    expect(buildRun.caFilesRemaining).toEqual([]);
     expect(deployRun.directUriPresence).toEqual(["absent"]);
+    expect(deployRun.caTrustPresence).toEqual(["absent"]);
     expect(aliasRun.directUriPresence).toEqual(["absent"]);
+    expect(aliasRun.caTrustPresence).toEqual(["absent"]);
 
     for (const run of [buildRun, deployRun, aliasRun]) {
       const output = [
@@ -284,6 +324,7 @@ describe("Website package-read credential boundary", () => {
         JSON.stringify(run.invocations),
       ].join("\n");
       expect(output).not.toContain(databaseDirectUri);
+      expect(output).not.toContain(databaseCaCert);
     }
   });
 
@@ -295,6 +336,44 @@ describe("Website package-read credential boundary", () => {
     expect(build.invocations).toEqual([]);
     expect(build.result.stderr).toContain(
       "DATABASE_DIRECT_URI is required for the Website build.",
+    );
+  });
+
+  it("requires the pinned production CA only for the Website build", () => {
+    const build = namedStep("Build Vercel production");
+    const deploy = namedStep("Deploy Vercel production");
+
+    expect(workflow.on.workflow_call.secrets.DATABASE_CA_CERT).toEqual({
+      required: true,
+    });
+    expect(build.env?.DATABASE_CA_CERT).toBe("${{ secrets.DATABASE_CA_CERT }}");
+    expect(workflow.env?.DATABASE_CA_CERT).toBeUndefined();
+    expect(workflow.jobs.deploy.env?.DATABASE_CA_CERT).toBeUndefined();
+    expect(deploy.env?.DATABASE_CA_CERT).toBeUndefined();
+    expect(
+      workflow.jobs.deploy.steps.filter((step) =>
+        Object.hasOwn(step.env ?? {}, "DATABASE_CA_CERT"),
+      ),
+    ).toEqual([build]);
+    expect(build.run).toContain('export NODE_EXTRA_CA_CERTS="$ca_file"');
+    expect(build.run).toContain("80:70:25:AD:50:D4:ED:21");
+
+    const missing = runStep(build, { databaseCaCert: "missing" });
+    expect(missing.result.status).toBe(1);
+    expect(missing.invocations).toEqual([]);
+    expect(missing.result.stderr).toContain(
+      "DATABASE_CA_CERT is required for the Website build.",
+    );
+
+    const wrong = runStep(build, { databaseCaCert: "wrong" });
+    expect(wrong.result.status).toBe(1);
+    expect(wrong.invocations).toEqual([]);
+    expect(wrong.caFilesRemaining).toEqual([]);
+    expect(wrong.result.stderr).toContain(
+      "Unexpected production database CA certificate.",
+    );
+    expect(wrong.result.stdout + wrong.result.stderr).not.toContain(
+      databaseCaCert,
     );
   });
 
