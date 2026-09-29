@@ -207,6 +207,7 @@ export async function applyPlatformRelease(
       await github.publishRelease({
         releaseId: release.id,
         repository: input.plan.repositories[key].repository,
+        targetSha: input.plan.repositories[key].targetSha,
         version: input.plan.version,
       })
     }

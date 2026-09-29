@@ -6,6 +6,7 @@ import {
   GhPlatformReleaseAnnouncementStore,
   githubChildEnvironment,
   safeGhErrorDetail,
+  selectReleaseIncludingDraft,
 } from '../../src/platform-release/github.js'
 
 function workflowRun(id: number, title: string) {
@@ -19,6 +20,27 @@ function workflowRun(id: number, title: string) {
 }
 
 describe('GitHub release manifest resume', () => {
+  it('recovers the single untagged draft GitHub creates for an absent version tag', () => {
+    const draft = {
+      draft: true,
+      name: 'findmydoc v0.47.0',
+      tag_name: 'untagged-66a7c68024b83e4adf3f',
+      target_commitish: 'a'.repeat(40),
+    }
+    expect(selectReleaseIncludingDraft([draft], 'v0.47.0')).toEqual(draft)
+    expect(selectReleaseIncludingDraft([{ ...draft, name: 'other release' }], 'v0.47.0')).toBeUndefined()
+    expect(selectReleaseIncludingDraft([{ ...draft, draft: false }], 'v0.47.0')).toBeUndefined()
+    expect(selectReleaseIncludingDraft([{ ...draft, tag_name: 'untagged-other' }], 'v0.47.0')).toBeUndefined()
+  })
+
+  it('rejects competing exact and untagged draft releases for one version', () => {
+    const draft = { draft: true, name: 'findmydoc v0.47.0', tag_name: 'untagged-1234' }
+    expect(() => selectReleaseIncludingDraft([
+      draft,
+      { draft: true, name: 'findmydoc v0.47.0', tag_name: 'v0.47.0' },
+    ], 'v0.47.0')).toThrow('Multiple GitHub releases match v0.47.0')
+  })
+
   it('accepts byte-identical assets and rejects different existing content', () => {
     expect(() => assertMatchingReleaseManifest('{"same":true}\n', '{"same":true}\n', 'org/repo', 'v0.46.0')).not.toThrow()
     expect(() => assertMatchingReleaseManifest('{"old":true}\n', '{"new":true}\n', 'org/repo', 'v0.46.0'))

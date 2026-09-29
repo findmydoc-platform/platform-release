@@ -116,10 +116,11 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
     this.releaseDetails.set(input.repository, details)
     return details
   }
-  async publishRelease(input: { repository: string }) {
+  async publishRelease(input: { repository: string; targetSha: string }) {
     if (this.publishFailureRepository === input.repository) throw new Error('release publication failed')
     const details = this.releaseDetails.get(input.repository)
     if (!details) throw new Error('release does not exist')
+    if (details.sha !== input.targetSha) throw new Error('unexpected publication target')
     const published = { ...details, draft: false, immutable: true,
       manifestAttached: this.manifestByRepository.has(input.repository), publishedAt: '2026-08-12T12:00:00Z' }
     this.releaseDetails.set(input.repository, published)

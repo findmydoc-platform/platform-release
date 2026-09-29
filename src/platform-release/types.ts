@@ -314,7 +314,7 @@ export type PlatformReleaseGitHubClient = {
   getRelease(repository: string, version: string): Promise<PlatformReleaseDetails | undefined>
   getReleaseManifest(repository: string, version: string): Promise<string | undefined>
   isAncestor(repository: string, ancestor: string, branch: string): Promise<boolean>
-  publishRelease(input: { repository: string; releaseId: number; version: string }): Promise<PlatformReleaseDetails>
+  publishRelease(input: { repository: string; releaseId: number; targetSha: string; version: string }): Promise<PlatformReleaseDetails>
   setReleasePlatformPublishedAt(input: {
     platformPublishedAt: string
     releaseId: number
