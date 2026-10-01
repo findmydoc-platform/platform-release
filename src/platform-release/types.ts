@@ -11,12 +11,14 @@ export type PlatformReleaseRepositoryConfig = {
 }
 
 export type PlatformReleaseConfig = {
+  authMail?: AuthMailCutoverConfig
   founderOps: {
     baseUrl: string
     ingestPath: string
   }
   platformBaselineVersion: string
-  repositories: Record<string, PlatformReleaseRepositoryConfig> & Record<PlatformRepositoryKey, PlatformReleaseRepositoryConfig>
+  repositories: Record<string, PlatformReleaseRepositoryConfig> &
+    Record<PlatformRepositoryKey, PlatformReleaseRepositoryConfig>
   schemaVersion: 1
 }
 
@@ -76,6 +78,7 @@ export type PlatformReleaseRepositoryPlan = {
 }
 
 export type PlatformReleasePlan = {
+  authMail?: AuthMailSuppressionBinding
   breakingChanges: Array<{
     message: string
     repository: string
@@ -199,10 +202,12 @@ export type ReleaseContentV3 = {
 
 export type PlatformReleaseManifestV3 = {
   changes: ReleaseContentChangeV3[]
-  components: Array<Omit<PlatformReleaseManifestComponent, 'deploymentRun' | 'key'> & {
-    deploymentRun: string | null
-    key: string
-  }>
+  components: Array<
+    Omit<PlatformReleaseManifestComponent, 'deploymentRun' | 'key'> & {
+      deploymentRun: string | null
+      key: string
+    }
+  >
   contentDigest: string
   highlights: string[]
   manifestDigest: string
@@ -228,7 +233,11 @@ export type ImportedGitHubRelease = {
 }
 
 export type ReleaseImportGitHubClient = {
-  compareReleaseCommits(repository: string, base: string, head: string): Promise<{
+  compareReleaseCommits(
+    repository: string,
+    base: string,
+    head: string,
+  ): Promise<{
     commits: ReleaseCommit[]
     mergeBaseSha: string
     status: 'ahead' | 'diverged' | 'identical'
@@ -282,13 +291,11 @@ export type FounderOpsIngestResult = {
 }
 
 export type FounderOpsReleaseClient = {
-  ingestManifest(input: {
-    manifest: string
-    manifestDigest: string
-  }): Promise<FounderOpsIngestResult>
+  ingestManifest(input: { manifest: string; manifestDigest: string }): Promise<FounderOpsIngestResult>
 }
 
 export type PlatformReleaseGitHubClient = {
+  getRepositoryFile?(repository: string, path: string, sha: string): Promise<string | undefined>
   compareCommits(repository: string, base: string, head: string): Promise<ReleaseCommit[]>
   createDraftRelease(input: {
     body: string
@@ -314,18 +321,33 @@ export type PlatformReleaseGitHubClient = {
   getRelease(repository: string, version: string): Promise<PlatformReleaseDetails | undefined>
   getReleaseManifest(repository: string, version: string): Promise<string | undefined>
   isAncestor(repository: string, ancestor: string, branch: string): Promise<boolean>
-  publishRelease(input: { repository: string; releaseId: number; targetSha: string; version: string }): Promise<PlatformReleaseDetails>
+  publishRelease(input: {
+    repository: string
+    releaseId: number
+    targetSha: string
+    version: string
+  }): Promise<PlatformReleaseDetails>
   setReleasePlatformPublishedAt(input: {
     platformPublishedAt: string
     releaseId: number
     repository: string
     version: string
   }): Promise<PlatformReleaseDetails>
-  ensureReleaseManifest(input: {
-    manifest: string
-    repository: string
-    version: string
-  }): Promise<void>
+  ensureReleaseManifest(input: { manifest: string; repository: string; version: string }): Promise<void>
+}
+
+export type AuthMailCutoverConfig = {
+  bindingId: string
+  workflow: string
+}
+
+export type AuthMailSuppressionBinding = AuthMailCutoverConfig & {
+  adrDigest: string
+  declarationDigest: string
+  functionFingerprint: string
+  migrationDigest: string
+  permissionFingerprint: string
+  websiteSha: string
 }
 
 export type PlatformReleaseApplyResult = {

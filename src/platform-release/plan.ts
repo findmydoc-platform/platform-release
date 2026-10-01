@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { canonicalJson, sha256 } from './canonical.js'
 import { assertManualVersion, compareVersions, highestBump, nextVersion } from './semver.js'
 import { boundedVisualCandidates } from './visuals.js'
+import { bindAuthMailSuppression, validateAuthMailBinding } from './auth-mail.js'
 import type {
   PlatformReleaseConfig,
   PlatformReleaseGitHubClient,
@@ -21,6 +22,7 @@ export function computePlanDigest(plan: Omit<PlatformReleasePlan, 'digest'> | Pl
 
 export function validatePlatformReleasePlan(plan: PlatformReleasePlan): void {
   if (plan.schemaVersion !== 2) throw new Error('Unsupported platform release plan schema.')
+  if (plan.authMail) validateAuthMailBinding(plan.authMail, plan.repositories.website.targetSha)
   for (const key of REPOSITORY_KEYS) {
     if (!plan.repositories[key]?.pullRequests.every((pullRequest) => Array.isArray(pullRequest.commitShas))) {
       throw new Error(`Platform release plan ${key} pull request provenance is incomplete.`)
@@ -30,7 +32,21 @@ export function validatePlatformReleasePlan(plan: PlatformReleasePlan): void {
   if (plan.digest !== expected) throw new Error(`Platform release plan digest mismatch: expected ${expected}.`)
 }
 
-export function validatePlanAgainstConfig(plan: PlatformReleasePlan, config: PlatformReleaseConfig): void {
+export function validatePlanAgainstConfig(
+  plan: PlatformReleasePlan,
+  config: PlatformReleaseConfig,
+  requireAuthMail = false,
+): void {
+  if (
+    config.authMail &&
+    (requireAuthMail || plan.authMail) &&
+    (!plan.authMail ||
+      plan.authMail.bindingId !== config.authMail.bindingId ||
+      plan.authMail.workflow !== config.authMail.workflow)
+  ) {
+    throw new Error('Frozen plan lacks the trusted Auth mail suppression binding; create a new approved plan.')
+  }
+  if (plan.authMail && !config.authMail) throw new Error('Auth mail cutover requires trusted workflow configuration.')
   const plannedKeys = Object.keys(plan.repositories).sort()
   if (JSON.stringify(plannedKeys) !== JSON.stringify([...REPOSITORY_KEYS].sort())) {
     throw new Error('Frozen plan repositories do not match the trusted platform release configuration.')
@@ -74,55 +90,67 @@ export async function createPlatformReleasePlan(
   input: { config: PlatformReleaseConfig; manualVersion?: string },
   github: PlatformReleaseGitHubClient,
 ): Promise<PlatformReleasePlan> {
-  const releases = await Promise.all(REPOSITORY_KEYS.map(async (key) => ({
-    key,
-    release: await github.getLatestRelease(input.config.repositories[key].repository),
-  })))
-  const releaseVersions = releases.flatMap(({ release }) => release ? [release.version] : [])
+  const releases = await Promise.all(
+    REPOSITORY_KEYS.map(async (key) => ({
+      key,
+      release: await github.getLatestRelease(input.config.repositories[key].repository),
+    })),
+  )
+  const releaseVersions = releases.flatMap(({ release }) => (release ? [release.version] : []))
   const uniqueReleaseVersions = new Set(releaseVersions)
   if (uniqueReleaseVersions.size > 1) {
     throw new Error(`Application release versions have diverged: ${[...uniqueReleaseVersions].join(', ')}.`)
   }
-  if (releases.some(({ release }) => !release) && releaseVersions.some((version) =>
-    version !== input.config.platformBaselineVersion)) {
+  if (
+    releases.some(({ release }) => !release) &&
+    releaseVersions.some((version) => version !== input.config.platformBaselineVersion)
+  ) {
     throw new Error('Application releases are in a partial published state; resume the existing frozen plan.')
   }
   const currentVersion = releaseVersions.sort(compareVersions).at(-1) ?? input.config.platformBaselineVersion
 
-  const entries = await Promise.all(REPOSITORY_KEYS.map(async (key): Promise<[PlatformRepositoryKey, PlatformReleaseRepositoryPlan]> => {
-    const repositoryConfig = input.config.repositories[key]
-    const latest = releases.find((entry) => entry.key === key)?.release
-    const baseSha = latest?.sha ?? repositoryConfig.cutoverSha
-    if (!baseSha) throw new Error(`${repositoryConfig.repository} has no release or configured cutover SHA.`)
-    const targetSha = await github.getBranchSha(repositoryConfig.repository, repositoryConfig.branch)
-    if (!await github.isAncestor(repositoryConfig.repository, baseSha, repositoryConfig.branch)) {
-      throw new Error(`Baseline ${baseSha} is not an ancestor of ${repositoryConfig.repository}:${repositoryConfig.branch}.`)
-    }
-    const commits = baseSha === targetSha
-      ? []
-      : await github.compareCommits(repositoryConfig.repository, baseSha, targetSha)
-    const pullRequests = await github.getPullRequests(repositoryConfig.repository, commits)
-    return [key, {
-      base: latest
-        ? { kind: 'release', sha: latest.sha, version: latest.version }
-        : { kind: 'cutover', sha: baseSha },
-      branch: repositoryConfig.branch,
-      commits,
-      deploymentWorkflow: repositoryConfig.deploymentWorkflow,
-      productionUrl: repositoryConfig.productionUrl,
-      pullRequests,
-      repository: repositoryConfig.repository,
-      surface: repositoryConfig.surface,
-      targetSha,
-    }]
-  }))
+  const entries = await Promise.all(
+    REPOSITORY_KEYS.map(async (key): Promise<[PlatformRepositoryKey, PlatformReleaseRepositoryPlan]> => {
+      const repositoryConfig = input.config.repositories[key]
+      const latest = releases.find((entry) => entry.key === key)?.release
+      const baseSha = latest?.sha ?? repositoryConfig.cutoverSha
+      if (!baseSha) throw new Error(`${repositoryConfig.repository} has no release or configured cutover SHA.`)
+      const targetSha = await github.getBranchSha(repositoryConfig.repository, repositoryConfig.branch)
+      if (!(await github.isAncestor(repositoryConfig.repository, baseSha, repositoryConfig.branch))) {
+        throw new Error(
+          `Baseline ${baseSha} is not an ancestor of ${repositoryConfig.repository}:${repositoryConfig.branch}.`,
+        )
+      }
+      const commits =
+        baseSha === targetSha ? [] : await github.compareCommits(repositoryConfig.repository, baseSha, targetSha)
+      const pullRequests = await github.getPullRequests(repositoryConfig.repository, commits)
+      return [
+        key,
+        {
+          base: latest
+            ? { kind: 'release', sha: latest.sha, version: latest.version }
+            : { kind: 'cutover', sha: baseSha },
+          branch: repositoryConfig.branch,
+          commits,
+          deploymentWorkflow: repositoryConfig.deploymentWorkflow,
+          productionUrl: repositoryConfig.productionUrl,
+          pullRequests,
+          repository: repositoryConfig.repository,
+          surface: repositoryConfig.surface,
+          targetSha,
+        },
+      ]
+    }),
+  )
   const repositories = Object.fromEntries(entries) as PlatformReleasePlan['repositories']
   const bump = combinedBump(Object.values(repositories))
   if (bump === 'none') throw new Error('A release cannot be planned without changes in either application.')
 
-  const breakingChanges = Object.values(repositories).flatMap((repository) => repository.commits
-    .filter((commit) => commit.bump === 'major')
-    .map((commit) => ({ message: commit.message, repository: repository.repository, sha: commit.sha })))
+  const breakingChanges = Object.values(repositories).flatMap((repository) =>
+    repository.commits
+      .filter((commit) => commit.bump === 'major')
+      .map((commit) => ({ message: commit.message, repository: repository.repository, sha: commit.sha })),
+  )
   if (breakingChanges.length > 0 && !input.manualVersion) {
     throw new Error('Breaking changes require an explicit manual platform version.')
   }
@@ -130,6 +158,9 @@ export async function createPlatformReleasePlan(
   const version = input.manualVersion ?? nextVersion(currentVersion, bump)
   if (input.manualVersion) assertManualVersion(input.manualVersion, currentVersion)
   const planWithoutDigest: Omit<PlatformReleasePlan, 'digest'> = {
+    ...(input.config.authMail
+      ? { authMail: await bindAuthMailSuppression(input.config.authMail, repositories.website, github) }
+      : {}),
     breakingChanges,
     createdAt: new Date().toISOString(),
     highestBump: bump,
@@ -137,8 +168,11 @@ export async function createPlatformReleasePlan(
     repositories,
     schemaVersion: 2,
     version,
-    visualCandidates: boundedVisualCandidates(Object.values(repositories).flatMap((repository) =>
-      repository.pullRequests.flatMap((pullRequest) => pullRequest.visuals))),
+    visualCandidates: boundedVisualCandidates(
+      Object.values(repositories).flatMap((repository) =>
+        repository.pullRequests.flatMap((pullRequest) => pullRequest.visuals),
+      ),
+    ),
   }
   return { ...planWithoutDigest, digest: computePlanDigest(planWithoutDigest) }
 }

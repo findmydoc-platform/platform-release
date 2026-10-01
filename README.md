@@ -6,6 +6,16 @@ This repository contains only the deterministic release engine, reusable deploym
 
 Internal operating documentation is maintained in the Operations repository.
 
+## Auth mail cutover preparation
+
+The runner binds the Website-owned no-op suppression declaration, migration, and approved ADR 032 to the frozen Website
+SHA. It coordinates preflight, cutover, resume, and explicitly confirmed rollback through a protected runtime adapter.
+The [adapter contract](docs/auth-mail-cutover.md) records the required evidence and the unresolved Website dependency.
+The default CLI has no runtime adapter and fails closed before deployment or other Production mutations. This code
+preparation does not establish hosted suppression or complete the end-to-end cutover acceptance criteria.
+
+Use `pnpm format <changed paths>` before committing. The formatter is pinned and only writes the supplied files.
+
 ## Website package access
 
 The Website reusable deployment workflow requires the caller secret `GH_PACKAGES_READ_TOKEN` with private package read access.
