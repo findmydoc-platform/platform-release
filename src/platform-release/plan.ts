@@ -3,7 +3,6 @@ import { dirname, resolve } from 'node:path'
 import { canonicalJson, sha256 } from './canonical.js'
 import { assertManualVersion, compareVersions, highestBump, nextVersion } from './semver.js'
 import { boundedVisualCandidates } from './visuals.js'
-import { bindAuthMailSuppression, validateAuthMailBinding } from './auth-mail.js'
 import type {
   PlatformReleaseConfig,
   PlatformReleaseGitHubClient,
@@ -22,7 +21,6 @@ export function computePlanDigest(plan: Omit<PlatformReleasePlan, 'digest'> | Pl
 
 export function validatePlatformReleasePlan(plan: PlatformReleasePlan): void {
   if (plan.schemaVersion !== 2) throw new Error('Unsupported platform release plan schema.')
-  if (plan.authMail) validateAuthMailBinding(plan.authMail, plan.repositories.website.targetSha)
   for (const key of REPOSITORY_KEYS) {
     if (!plan.repositories[key]?.pullRequests.every((pullRequest) => Array.isArray(pullRequest.commitShas))) {
       throw new Error(`Platform release plan ${key} pull request provenance is incomplete.`)
@@ -32,21 +30,7 @@ export function validatePlatformReleasePlan(plan: PlatformReleasePlan): void {
   if (plan.digest !== expected) throw new Error(`Platform release plan digest mismatch: expected ${expected}.`)
 }
 
-export function validatePlanAgainstConfig(
-  plan: PlatformReleasePlan,
-  config: PlatformReleaseConfig,
-  requireAuthMail = false,
-): void {
-  if (
-    config.authMail &&
-    (requireAuthMail || plan.authMail) &&
-    (!plan.authMail ||
-      plan.authMail.bindingId !== config.authMail.bindingId ||
-      plan.authMail.workflow !== config.authMail.workflow)
-  ) {
-    throw new Error('Frozen plan lacks the trusted Auth mail suppression binding; create a new approved plan.')
-  }
-  if (plan.authMail && !config.authMail) throw new Error('Auth mail cutover requires trusted workflow configuration.')
+export function validatePlanAgainstConfig(plan: PlatformReleasePlan, config: PlatformReleaseConfig): void {
   const plannedKeys = Object.keys(plan.repositories).sort()
   if (JSON.stringify(plannedKeys) !== JSON.stringify([...REPOSITORY_KEYS].sort())) {
     throw new Error('Frozen plan repositories do not match the trusted platform release configuration.')
@@ -158,9 +142,6 @@ export async function createPlatformReleasePlan(
   const version = input.manualVersion ?? nextVersion(currentVersion, bump)
   if (input.manualVersion) assertManualVersion(input.manualVersion, currentVersion)
   const planWithoutDigest: Omit<PlatformReleasePlan, 'digest'> = {
-    ...(input.config.authMail
-      ? { authMail: await bindAuthMailSuppression(input.config.authMail, repositories.website, github) }
-      : {}),
     breakingChanges,
     createdAt: new Date().toISOString(),
     highestBump: bump,

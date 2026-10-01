@@ -4,9 +4,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bumpForMessage, compareVersions, parseVersion } from './semver.js'
 import { extractReleaseVisuals } from './visuals.js'
-import { canonicalJson, sha256 } from './canonical.js'
-import { validateAuthMailProgress } from './auth-mail.js'
-import type { AuthMailContext, AuthMailProgress, AuthMailStateStore } from './auth-mail.js'
 import type {
   PlatformReleaseAnnouncementStore,
   PlatformReleaseGitHubClient,
@@ -490,22 +487,6 @@ export async function discoverReleasePullRequests(input: {
 }
 
 export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
-  async getRepositoryFile(repository: string, path: string, sha: string): Promise<string | undefined> {
-    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('A full frozen Website SHA is required.')
-    const file = await optionalApi<{ content?: string; encoding?: string; size?: number; type?: string }>(
-      `repos/${repository}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${sha}`,
-    )
-    if (!file) return undefined
-    if (
-      file.type !== 'file' ||
-      file.encoding !== 'base64' ||
-      typeof file.content !== 'string' ||
-      typeof file.size !== 'number' ||
-      file.size > 256_000
-    )
-      throw new Error('Frozen Website suppression source is unavailable.')
-    return Buffer.from(file.content, 'base64').toString('utf8')
-  }
   async getPublishedReleases(repository: string): Promise<ImportedGitHubRelease[]> {
     const releases: GitHubRelease[] = []
     for (let page = 1; ; page += 1) {
@@ -915,124 +896,6 @@ export class GhPlatformReleaseAnnouncementStore implements PlatformReleaseAnnoun
         state: expectedState,
       },
       method: 'POST',
-    })
-  }
-}
-
-export class GhAuthMailStateStore implements AuthMailStateStore {
-  constructor(
-    private readonly repository = 'findmydoc-platform/platform-release',
-    private readonly ref = 'main',
-    private readonly token = '',
-    private readonly requestOverride?: GitHubApiRequest,
-  ) {}
-
-  private request<T>(path: string, options: GitHubApiOptions = {}): Promise<T> {
-    return this.requestOverride
-      ? this.requestOverride<T>(path, options)
-      : api<T>(path, options, this.token ? { ...process.env, GH_TOKEN: this.token } : process.env)
-  }
-
-  private identity(context: AuthMailContext) {
-    return {
-      bindingDigest: sha256(canonicalJson(context.binding)),
-      contentDigest: context.contentDigest,
-      planDigest: context.planDigest,
-      schemaVersion: 1,
-      version: context.version,
-    }
-  }
-
-  private async findDeployment(context: AuthMailContext): Promise<GitHubDeployment | undefined> {
-    const matches: GitHubDeployment[] = []
-    for (let page = 1; ; page += 1) {
-      const deployments = await this.request<GitHubDeployment[]>(
-        `repos/${this.repository}/deployments?environment=auth-mail-cutover&per_page=100&page=${page}`,
-      )
-      for (const deployment of deployments) {
-        let payload = deployment.payload
-        if (typeof payload === 'string') {
-          try {
-            payload = JSON.parse(payload) as unknown
-          } catch {
-            throw new Error('Stored Auth mail release identity is invalid.')
-          }
-        }
-        if (
-          !payload ||
-          typeof payload !== 'object' ||
-          (payload as { planDigest?: string }).planDigest !== context.planDigest
-        )
-          continue
-        if (canonicalJson(payload) !== canonicalJson(this.identity(context)))
-          throw new Error('Stored Auth mail release identity is conflicting.')
-        matches.push(deployment)
-      }
-      if (deployments.length < 100) break
-    }
-    if (matches.length > 1) throw new Error('Duplicate Auth mail release state requires operator recovery.')
-    return matches[0]
-  }
-
-  async getState(context: AuthMailContext): Promise<AuthMailProgress | undefined> {
-    const deployment = await this.findDeployment(context)
-    if (!deployment) return undefined
-    let latest: AuthMailProgress | undefined
-    let rollback = false
-    for (let page = 1; ; page += 1) {
-      const statuses = await this.request<Array<{ description?: string }>>(
-        `repos/${this.repository}/deployments/${deployment.id}/statuses?per_page=100&page=${page}`,
-      )
-      for (const status of statuses) {
-        try {
-          const progress = validateAuthMailProgress(JSON.parse(status.description ?? ''))
-          latest ??= progress
-          rollback ||= progress.rollback
-        } catch {
-          throw new Error('Stored Auth mail release state is invalid.')
-        }
-      }
-      if (statuses.length < 100) break
-    }
-    if (!latest) throw new Error('Stored Auth mail release state is invalid.')
-    return rollback ? { rollback: true, state: 'rollback-required' } : latest
-  }
-
-  async setState(context: AuthMailContext, progress: AuthMailProgress): Promise<void> {
-    validateAuthMailProgress(progress)
-    let deployment = await this.findDeployment(context)
-    if (deployment && !progress.rollback && (await this.getState(context))?.rollback)
-      throw new Error('Explicit rollback is permanent for this release identity.')
-    if (!deployment) {
-      deployment = await this.request<GitHubDeployment>(`repos/${this.repository}/deployments`, {
-        method: 'POST',
-        body: {
-          auto_merge: false,
-          description: `Auth mail cutover for findmydoc ${context.version}`,
-          environment: 'auth-mail-cutover',
-          payload: this.identity(context),
-          production_environment: false,
-          ref: this.ref,
-          required_contexts: [],
-          transient_environment: false,
-        },
-      })
-    }
-    if (!Number.isSafeInteger(deployment.id) || deployment.id <= 0)
-      throw new Error('Stored Auth mail deployment identity is invalid.')
-    await this.request(`repos/${this.repository}/deployments/${deployment.id}/statuses`, {
-      method: 'POST',
-      body: {
-        auto_inactive: false,
-        description: JSON.stringify(progress),
-        environment: 'auth-mail-cutover',
-        state:
-          progress.state === 'published'
-            ? 'success'
-            : progress.state === 'rollback-required'
-              ? 'failure'
-              : 'in_progress',
-      },
     })
   }
 }

@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { computePlanDigest } from '../../src/platform-release/plan.js'
 import { getPlatformReleaseStatus } from '../../src/platform-release/status.js'
 import type { PlatformReleaseGitHubClient, PlatformReleasePlan } from '../../src/platform-release/types.js'
-import { MemoryAuthMailState, suppressionBinding } from './auth-mail-fixtures.js'
 
 function plan(): PlatformReleasePlan {
   const repository = (name: string, targetSha: string) => ({
@@ -33,38 +32,6 @@ function plan(): PlatformReleasePlan {
 }
 
 describe('platform release status', () => {
-  it.each([
-    'preflight-pending',
-    'cutover-ready',
-    'cutover-applied',
-    'deploying',
-    'deployed',
-    'release-pending',
-    'published',
-    'rollback-required',
-  ] as const)('reports recorded %s without claiming fresh runtime proof', async (phase) => {
-    const frozen = plan()
-    frozen.repositories.website.targetSha = suppressionBinding.websiteSha
-    frozen.authMail = suppressionBinding
-    frozen.digest = computePlanDigest(frozen)
-    const state = new MemoryAuthMailState()
-    state.progress = { state: phase, rollback: phase === 'rollback-required' }
-    const github = {
-      async findWorkflowRun() {
-        return undefined
-      },
-      async getRelease() {
-        return undefined
-      },
-    } as unknown as PlatformReleaseGitHubClient
-    const result = (await getPlatformReleaseStatus(frozen, github, {
-      authMailState: state,
-      contentDigest: 'd'.repeat(64),
-    })) as {
-      authMail: { fresh: boolean; adapterAvailable: boolean; state: string }
-    }
-    expect(result.authMail).toMatchObject({ fresh: false, adapterAvailable: false, state: phase })
-  })
   it('reports a release tag that targets the wrong SHA', async () => {
     const github = {
       async findWorkflowRun() {

@@ -11,7 +11,6 @@ export type PlatformReleaseRepositoryConfig = {
 }
 
 export type PlatformReleaseConfig = {
-  authMail?: AuthMailCutoverConfig
   founderOps: {
     baseUrl: string
     ingestPath: string
@@ -78,7 +77,6 @@ export type PlatformReleaseRepositoryPlan = {
 }
 
 export type PlatformReleasePlan = {
-  authMail?: AuthMailSuppressionBinding
   breakingChanges: Array<{
     message: string
     repository: string
@@ -295,7 +293,6 @@ export type FounderOpsReleaseClient = {
 }
 
 export type PlatformReleaseGitHubClient = {
-  getRepositoryFile?(repository: string, path: string, sha: string): Promise<string | undefined>
   compareCommits(repository: string, base: string, head: string): Promise<ReleaseCommit[]>
   createDraftRelease(input: {
     body: string
@@ -334,20 +331,6 @@ export type PlatformReleaseGitHubClient = {
     version: string
   }): Promise<PlatformReleaseDetails>
   ensureReleaseManifest(input: { manifest: string; repository: string; version: string }): Promise<void>
-}
-
-export type AuthMailCutoverConfig = {
-  bindingId: string
-  workflow: string
-}
-
-export type AuthMailSuppressionBinding = AuthMailCutoverConfig & {
-  adrDigest: string
-  declarationDigest: string
-  functionFingerprint: string
-  migrationDigest: string
-  permissionFingerprint: string
-  websiteSha: string
 }
 
 export type PlatformReleaseApplyResult = {

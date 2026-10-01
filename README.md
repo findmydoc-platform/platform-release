@@ -6,15 +6,8 @@ This repository contains only the deterministic release engine, reusable deploym
 
 Internal operating documentation is maintained in the Operations repository.
 
-## Auth mail cutover preparation
-
-The runner binds the Website-owned no-op suppression declaration, migration, and approved ADR 032 to the frozen Website
-SHA. It coordinates preflight, cutover, resume, and explicitly confirmed rollback through a protected runtime adapter.
-The [adapter contract](docs/auth-mail-cutover.md) records the required evidence and the unresolved Website dependency.
-The default CLI has no runtime adapter and fails closed before deployment or other Production mutations. This code
-preparation does not establish hosted suppression or complete the end-to-end cutover acceptance criteria.
-
-Use `pnpm format <changed paths>` before committing. The formatter is pinned and only writes the supplied files.
+The Ops-owned Supabase reconciliation integration is in preparation. This branch blocks `apply` until the actual Ops
+workflow contract is available. See [the integration boundary](docs/supabase-reconciliation.md).
 
 ## Website package access
 

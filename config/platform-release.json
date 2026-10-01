@@ -1,9 +1,5 @@
 {
   "schemaVersion": 1,
-  "authMail": {
-    "bindingId": "website-production",
-    "workflow": "platform-release-auth-mail.yml"
-  },
   "platformBaselineVersion": "v0.45.0",
   "founderOps": {
     "baseUrl": "https://founder-ops.findmydoc.eu",

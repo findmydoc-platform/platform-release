@@ -8,9 +8,6 @@ import {
   assertAnnounceablePlatformManifest,
   assertPublishedPlatformRelease,
 } from './platform-release/announce.js'
-import { applyPlatformRelease, rollbackPlatformRelease } from './platform-release/apply.js'
-import { AuthMailCutoverError } from './platform-release/auth-mail.js'
-import type { AuthMailCutoverClient, AuthMailStateStore } from './platform-release/auth-mail.js'
 import {
   computeReleaseContentDigest,
   readReleaseContent,
@@ -19,11 +16,7 @@ import {
 } from './platform-release/content.js'
 import { DEFAULT_PLATFORM_RELEASE_CONFIG_PATH, loadPlatformReleaseConfig } from './platform-release/config.js'
 import { HttpFounderOpsReleaseClient } from './platform-release/founder-ops.js'
-import {
-  GhAuthMailStateStore,
-  GhPlatformReleaseAnnouncementStore,
-  GhPlatformReleaseClient,
-} from './platform-release/github.js'
+import { GhPlatformReleaseAnnouncementStore, GhPlatformReleaseClient } from './platform-release/github.js'
 import { readPlatformReleaseManifest, validateManifestAgainstConfig } from './platform-release/manifest.js'
 import {
   buildReleaseImportManifest,
@@ -66,18 +59,7 @@ type ApplyOptions = {
   manifestOutput: string
   plan: string
 }
-type StatusOptions = { content?: string; json?: boolean; plan: string }
-type RollbackOptions = {
-  apply?: boolean
-  configPath: string
-  content: string
-  json?: boolean
-  plan: string
-  confirmContentDigest?: string
-  confirmDigest?: string
-  confirmRollbackDigest?: string
-  confirmVersion?: string
-}
+type StatusOptions = { json?: boolean; plan: string }
 type AnnounceOptions = {
   configPath: string
   confirmManifestDigest: string
@@ -128,8 +110,6 @@ type ImportIngestOptions = {
   json?: boolean
 }
 type CliRuntime = {
-  createAuthMailClient: () => AuthMailCutoverClient | undefined
-  createAuthMailStateStore: () => AuthMailStateStore
   createAnnouncementStore: () => PlatformReleaseAnnouncementStore
   createGitHubClient: () => PlatformReleaseGitHubClient
   createReleaseImportGitHubClient: () => ReleaseImportGitHubClient
@@ -138,13 +118,6 @@ type CliRuntime = {
 }
 
 const defaultRuntime: CliRuntime = {
-  createAuthMailClient: () => undefined,
-  createAuthMailStateStore: () =>
-    new GhAuthMailStateStore(
-      process.env.GITHUB_REPOSITORY ?? 'findmydoc-platform/platform-release',
-      process.env.GITHUB_SHA ?? 'main',
-      process.env.GITHUB_STATE_TOKEN ?? '',
-    ),
   createAnnouncementStore: () =>
     new GhPlatformReleaseAnnouncementStore(
       process.env.GITHUB_REPOSITORY ?? 'findmydoc-platform/platform-release',
@@ -163,15 +136,7 @@ function writeJson(value: unknown, write: (value: string) => void): void {
 
 function writeError(error: unknown, json: boolean | undefined, runtime: CliRuntime): void {
   const message = error instanceof Error ? error.message : String(error)
-  if (json)
-    writeJson(
-      {
-        error: { message },
-        ...(error instanceof AuthMailCutoverError ? { releaseState: error.state } : {}),
-        status: 'failed',
-      },
-      runtime.writeStdout,
-    )
+  if (json) writeJson({ error: { message }, status: 'failed' }, runtime.writeStdout)
   else runtime.writeStderr(`${message}\n`)
   process.exitCode = 1
 }
@@ -329,98 +294,22 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
     .option('--announce', 'send the compact Google Chat announcement after FounderOps ingestion')
     .option('--json', 'emit JSON output')
     .action(async (options: ApplyOptions) => {
-      try {
-        if (!options.apply) throw new Error('--apply is required for platform release publication.')
-        const [config, plan] = await Promise.all([
-          loadPlatformReleaseConfig(options.configPath),
-          readPlatformReleasePlan(options.plan),
-        ])
-        const content = await readReleaseContent(options.content, plan)
-        const authMail = runtime.createAuthMailClient()
-        if (plan.authMail && !authMail)
-          throw new AuthMailCutoverError(
-            'preflight-pending',
-            'The protected Website Auth mail adapter is unavailable; no Production mutation is permitted.',
-          )
-        const result = await applyPlatformRelease(
-          {
-            announce: options.announce === true,
-            config,
-            confirmContentDigest: options.confirmContentDigest,
-            confirmDigest: options.confirmDigest,
-            confirmVersion: options.confirmVersion,
-            content,
-            onManifest: async (manifest) => {
-              const manifestPath = resolve(options.manifestOutput)
-              await mkdir(dirname(manifestPath), { recursive: true })
-              await writeFile(manifestPath, manifest, 'utf8')
-            },
-            plan,
-            webhook: process.env.GOOGLE_CHAT_WEBHOOK_URL,
-          },
-          runtime.createGitHubClient(),
-          founderOpsClient(config),
-          runtime.createAnnouncementStore(),
-          {
-            authMail,
-            authMailState: runtime.createAuthMailStateStore(),
-          },
-        )
-        if (options.json) writeJson(result, runtime.writeStdout)
-        else runtime.writeStdout(`Published findmydoc ${result.version}.\n`)
-      } catch (error) {
-        writeError(error, options.json, runtime)
-      }
-    })
-
-  program
-    .command('rollback')
-    .description('Inspect or explicitly restore frozen pre-release SHAs while retaining Auth mail suppression')
-    .requiredOption('--plan <path>', 'immutable approved platform release plan')
-    .requiredOption('--content <path>', 'approved release content')
-    .option('--config-path <path>', 'trusted platform release configuration path', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
-    .option('--confirm-digest <digest>', 'exact frozen plan digest')
-    .option('--confirm-content-digest <digest>', 'exact approved content digest')
-    .option('--confirm-version <version>', 'exact planned version')
-    .option('--confirm-rollback-digest <digest>', 'separate frozen rollback identity')
-    .option('--apply', 'disable affected Auth commands and restore both previous SHAs')
-    .option('--json', 'emit JSON output')
-    .action(async (options: RollbackOptions) => {
-      try {
-        const config = await loadPlatformReleaseConfig(options.configPath)
-        const plan = await readPlatformReleasePlan(options.plan)
-        const content = await readReleaseContent(options.content, plan)
-        writeJson(
-          await rollbackPlatformRelease(
-            { ...options, apply: options.apply === true, config, content, plan },
-            runtime.createGitHubClient(),
-            { authMail: runtime.createAuthMailClient(), authMailState: runtime.createAuthMailStateStore() },
-          ),
-          runtime.writeStdout,
-        )
-      } catch (error) {
-        writeError(error, options.json, runtime)
-      }
+      writeError(
+        new Error('The Ops release reconciliation contract is unavailable; no Production mutation is permitted.'),
+        options.json,
+        runtime,
+      )
     })
 
   program
     .command('status')
     .description('Inspect deployments and GitHub releases for a frozen plan')
     .requiredOption('--plan <path>', 'immutable JSON plan')
-    .option('--content <path>', 'approved content for Auth mail release state inspection')
     .option('--json', 'emit JSON output')
     .action(async (options: StatusOptions) => {
       try {
-        const plan = await readPlatformReleasePlan(options.plan)
-        const contentDigest = options.content
-          ? computeReleaseContentDigest(await readReleaseContent(options.content, plan))
-          : undefined
         writeJson(
-          await getPlatformReleaseStatus(plan, runtime.createGitHubClient(), {
-            authMail: runtime.createAuthMailClient(),
-            authMailState: runtime.createAuthMailStateStore(),
-            contentDigest,
-          }),
+          await getPlatformReleaseStatus(await readPlatformReleasePlan(options.plan), runtime.createGitHubClient()),
           runtime.writeStdout,
         )
       } catch (error) {
