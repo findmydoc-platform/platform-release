@@ -11,6 +11,7 @@ export type PlatformReleaseRepositoryConfig = {
 }
 
 export type PlatformReleaseConfig = {
+  supabaseReconciliation?: SupabaseReleaseConfig
   founderOps: {
     baseUrl: string
     ingestPath: string
@@ -77,6 +78,7 @@ export type PlatformReleaseRepositoryPlan = {
 }
 
 export type PlatformReleasePlan = {
+  supabaseReconciliation?: SupabaseReleaseBinding
   breakingChanges: Array<{
     message: string
     repository: string
@@ -93,6 +95,11 @@ export type PlatformReleasePlan = {
 }
 
 export type WorkflowRun = {
+  event?: string
+  headBranch?: string
+  headSha?: string
+  path?: string
+  runAttempt?: number
   conclusion: string | null
   databaseId: number
   displayTitle: string
@@ -293,6 +300,15 @@ export type FounderOpsReleaseClient = {
 }
 
 export type PlatformReleaseGitHubClient = {
+  getRepositoryFile?(repository: string, path: string, sha: string): Promise<string | undefined>
+  dispatchWorkflowRun?(input: {
+    branch: string
+    inputs: Record<string, string>
+    repository: string
+    workflow: string
+  }): Promise<Pick<WorkflowRun, 'databaseId' | 'url'>>
+  getWorkflowRun?(repository: string, runId: number): Promise<WorkflowRun>
+  getWorkflowArtifact?(repository: string, run: WorkflowRun, name: string): Promise<WorkflowArtifactBundle>
   compareCommits(repository: string, base: string, head: string): Promise<ReleaseCommit[]>
   createDraftRelease(input: {
     body: string
@@ -334,6 +350,7 @@ export type PlatformReleaseGitHubClient = {
 }
 
 export type PlatformReleaseApplyResult = {
+  reconciliation?: SupabaseReleaseAttestation
   announcement: 'already_sent' | 'sent' | 'skipped'
   contentDigest: string
   digest: string
@@ -343,4 +360,53 @@ export type PlatformReleaseApplyResult = {
   status: 'published'
   version: string
   workflows: Record<PlatformRepositoryKey, WorkflowRun>
+}
+
+export type SupabaseReleaseConfig = { repository: string; branch: string; workflow: string }
+export type SupabaseReleaseTarget = {
+  instance: string
+  profile: string
+  projectRefDigest: string
+  managedFields: string[]
+}
+export type SupabaseReleaseBinding = SupabaseReleaseConfig & {
+  schemaVersion: 1
+  opsSha: string
+  workflowDigest: string
+  targets: Record<'preview' | 'production', SupabaseReleaseTarget>
+}
+export type SupabaseReleaseContext = {
+  schemaVersion: 1
+  environment: 'preview' | 'production'
+  version: string
+  planDigest: string
+  contentDigest: string
+  opsSha: string
+}
+export type WorkflowArtifactBundle = { id: number; name: string; digest: string; files: Record<string, string> }
+export type SupabaseReleaseRunStore = {
+  getRun(context: SupabaseReleaseContext): Promise<number | null | undefined>
+  begin(context: SupabaseReleaseContext): Promise<void>
+  recordRun(context: SupabaseReleaseContext, runId: number): Promise<void>
+}
+export type SupabaseReleaseAttestation = {
+  schemaVersion: 1
+  opsSha: string
+  planDigest: string
+  contentDigest: string
+  version: string
+  environments: Record<
+    'preview' | 'production',
+    {
+      artifactId: number
+      artifactDigest: string
+      artifactName: string
+      runId: number
+      runAttempt: number
+      runUrl: string
+      resultDigest: string
+      managedFields: string[]
+      status: 'verified'
+    }
+  >
 }

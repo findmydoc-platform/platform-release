@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
+import { applyPlatformRelease } from './platform-release/apply.js'
+import { GhSupabaseReleaseRunStore } from './platform-release/supabase-github.js'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -16,7 +18,7 @@ import {
 } from './platform-release/content.js'
 import { DEFAULT_PLATFORM_RELEASE_CONFIG_PATH, loadPlatformReleaseConfig } from './platform-release/config.js'
 import { HttpFounderOpsReleaseClient } from './platform-release/founder-ops.js'
-import { GhPlatformReleaseAnnouncementStore, GhPlatformReleaseClient } from './platform-release/github.js'
+import { api, GhPlatformReleaseAnnouncementStore, GhPlatformReleaseClient } from './platform-release/github.js'
 import { readPlatformReleaseManifest, validateManifestAgainstConfig } from './platform-release/manifest.js'
 import {
   buildReleaseImportManifest,
@@ -35,6 +37,7 @@ import {
   createPlatformReleasePlan,
   readPlatformReleasePlan,
   writePlatformReleasePlan,
+  validatePlanAgainstConfig,
 } from './platform-release/plan.js'
 import { inspectImmutableManifestGapRecovery, recoverImmutableManifestGap } from './platform-release/recover.js'
 import { getPlatformReleaseStatus } from './platform-release/status.js'
@@ -43,6 +46,9 @@ import type {
   PlatformReleaseGitHubClient,
   ReleaseImportGitHubClient,
   ReleaseImportPlan,
+  SupabaseReleaseRunStore,
+  PlatformReleaseConfig,
+  FounderOpsReleaseClient,
 } from './platform-release/types.js'
 
 type PlanOptions = { configPath: string; contentTemplate?: string; json?: boolean; output?: string; version?: string }
@@ -57,9 +63,10 @@ type ApplyOptions = {
   content: string
   json?: boolean
   manifestOutput: string
+  reconciliationOutput: string
   plan: string
 }
-type StatusOptions = { json?: boolean; plan: string }
+type StatusOptions = { json?: boolean; plan: string; content?: string }
 type AnnounceOptions = {
   configPath: string
   confirmManifestDigest: string
@@ -110,6 +117,8 @@ type ImportIngestOptions = {
   json?: boolean
 }
 type CliRuntime = {
+  createFounderOpsClient: (config: PlatformReleaseConfig) => FounderOpsReleaseClient
+  createSupabaseRunStore: () => SupabaseReleaseRunStore
   createAnnouncementStore: () => PlatformReleaseAnnouncementStore
   createGitHubClient: () => PlatformReleaseGitHubClient
   createReleaseImportGitHubClient: () => ReleaseImportGitHubClient
@@ -118,6 +127,18 @@ type CliRuntime = {
 }
 
 const defaultRuntime: CliRuntime = {
+  createFounderOpsClient: (config) => founderOpsClient(config),
+  createSupabaseRunStore: () =>
+    new GhSupabaseReleaseRunStore(
+      (path, options) =>
+        api(
+          path,
+          options,
+          process.env.GITHUB_STATE_TOKEN ? { ...process.env, GH_TOKEN: process.env.GITHUB_STATE_TOKEN } : process.env,
+        ),
+      process.env.GITHUB_REPOSITORY ?? 'findmydoc-platform/platform-release',
+      process.env.GITHUB_SHA ?? 'main',
+    ),
   createAnnouncementStore: () =>
     new GhPlatformReleaseAnnouncementStore(
       process.env.GITHUB_REPOSITORY ?? 'findmydoc-platform/platform-release',
@@ -291,25 +312,75 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
       'artifacts/platform-release/platform-release.json',
     )
     .option('--config-path <path>', 'trusted platform release configuration path', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
+    .option(
+      '--reconciliation-output <path>',
+      'write verified Ops release evidence',
+      'artifacts/platform-release/supabase-reconciliation.json',
+    )
     .option('--announce', 'send the compact Google Chat announcement after FounderOps ingestion')
     .option('--json', 'emit JSON output')
     .action(async (options: ApplyOptions) => {
-      writeError(
-        new Error('The Ops release reconciliation contract is unavailable; no Production mutation is permitted.'),
-        options.json,
-        runtime,
-      )
+      try {
+        if (!options.apply) throw new Error('--apply is required.')
+        const [config, plan] = await Promise.all([
+          loadPlatformReleaseConfig(options.configPath),
+          readPlatformReleasePlan(options.plan),
+        ])
+        validatePlanAgainstConfig(plan, config, true)
+        const content = await readReleaseContent(options.content, plan)
+        const contentDigest = computeReleaseContentDigest(content)
+        if (
+          options.confirmDigest !== plan.digest ||
+          options.confirmContentDigest !== contentDigest ||
+          options.confirmVersion !== plan.version
+        )
+          throw new Error('Release approval must exactly match the frozen version, plan digest, and content digest.')
+        const save = async (path: string, value: string) => {
+          const absolute = resolve(path)
+          await mkdir(dirname(absolute), { recursive: true })
+          await writeFile(absolute, value, 'utf8')
+        }
+        const result = await applyPlatformRelease(
+          {
+            announce: options.announce === true,
+            config,
+            plan,
+            content,
+            confirmDigest: options.confirmDigest,
+            confirmContentDigest: options.confirmContentDigest,
+            confirmVersion: options.confirmVersion,
+            webhook: process.env.GOOGLE_CHAT_WEBHOOK_URL,
+            onManifest: (value) => save(options.manifestOutput, value),
+            onReconciliation: (value) => save(options.reconciliationOutput, `${JSON.stringify(value, null, 2)}\n`),
+          },
+          runtime.createGitHubClient(),
+          runtime.createFounderOpsClient(config),
+          runtime.createAnnouncementStore(),
+          { supabaseRunStore: runtime.createSupabaseRunStore() },
+        )
+        writeJson(result, runtime.writeStdout)
+      } catch (error) {
+        writeError(error, options.json, runtime)
+      }
     })
 
   program
     .command('status')
     .description('Inspect deployments and GitHub releases for a frozen plan')
     .requiredOption('--plan <path>', 'immutable JSON plan')
+    .option('--content <path>', 'approved release content for exact Ops invocation lookup')
     .option('--json', 'emit JSON output')
     .action(async (options: StatusOptions) => {
       try {
+        const plan = await readPlatformReleasePlan(options.plan)
+        const contentDigest = options.content
+          ? computeReleaseContentDigest(await readReleaseContent(options.content, plan))
+          : undefined
         writeJson(
-          await getPlatformReleaseStatus(await readPlatformReleasePlan(options.plan), runtime.createGitHubClient()),
+          await getPlatformReleaseStatus(plan, runtime.createGitHubClient(), {
+            contentDigest,
+            supabaseRunStore: contentDigest ? runtime.createSupabaseRunStore() : undefined,
+          }),
           runtime.writeStdout,
         )
       } catch (error) {

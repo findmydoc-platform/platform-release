@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { computePlanDigest } from '../../src/platform-release/plan.js'
 import { getPlatformReleaseStatus } from '../../src/platform-release/status.js'
 import type { PlatformReleaseGitHubClient, PlatformReleasePlan } from '../../src/platform-release/types.js'
+import { opsBinding, opsFixture } from './supabase-fixture.js'
+import { reconcileSupabaseRelease } from '../../src/platform-release/supabase-reconciliation.js'
 
 function plan(): PlatformReleasePlan {
   const repository = (name: string, targetSha: string) => ({
@@ -32,6 +34,43 @@ function plan(): PlatformReleasePlan {
 }
 
 describe('platform release status', () => {
+  it('reports verified historical Ops evidence without dispatching or asserting current remote freshness', async () => {
+    const frozen = plan()
+    frozen.supabaseReconciliation = opsBinding
+    frozen.digest = computePlanDigest(frozen)
+    const fixture = opsFixture()
+    const github = {
+      ...fixture.client,
+      async isAncestor() {
+        return true
+      },
+      async findWorkflowRun() {
+        return undefined
+      },
+      async getRelease() {
+        return undefined
+      },
+    } as unknown as PlatformReleaseGitHubClient
+    await reconcileSupabaseRelease(frozen, 'c'.repeat(64), github, fixture.store)
+    fixture.events.length = 0
+    const result = await getPlatformReleaseStatus(frozen, github, {
+      contentDigest: 'c'.repeat(64),
+      supabaseRunStore: fixture.store,
+    })
+    expect(result).toMatchObject({
+      reconciliation: {
+        fresh: false,
+        environments: { preview: { phase: 'verified' }, production: { phase: 'verified' } },
+      },
+    })
+    expect(fixture.events).toEqual(['verified:preview', 'verified:production'])
+    expect(await getPlatformReleaseStatus(frozen, github)).toMatchObject({
+      reconciliation: {
+        fresh: false,
+        environments: { preview: { phase: 'unknown' }, production: { phase: 'unknown' } },
+      },
+    })
+  })
   it('reports a release tag that targets the wrong SHA', async () => {
     const github = {
       async findWorkflowRun() {

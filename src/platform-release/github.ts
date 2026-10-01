@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bumpForMessage, compareVersions, parseVersion } from './semver.js'
 import { extractReleaseVisuals } from './visuals.js'
+import { GitHubSupabaseOperations } from './supabase-github.js'
 import type {
   PlatformReleaseAnnouncementStore,
   PlatformReleaseGitHubClient,
@@ -74,7 +75,7 @@ type GitHubDeploymentStatus = {
   state?: string
 }
 
-type GitHubApiOptions = { method?: string; body?: unknown }
+type GitHubApiOptions = { method?: string; body?: unknown; apiVersion?: string }
 type GitHubApiRequest = <T>(path: string, options?: GitHubApiOptions) => Promise<T>
 
 const WORKFLOW_RUNS_PAGE_SIZE = 100
@@ -210,7 +211,11 @@ export async function collectCommitEvidence(
   return { complete: false, files, message: message ?? '' }
 }
 
-async function runGh(args: string[], input?: string, environment: NodeJS.ProcessEnv = process.env): Promise<string> {
+export async function runGh(
+  args: string[],
+  input?: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn('gh', args, {
       env: githubChildEnvironment(environment),
@@ -236,12 +241,13 @@ async function runGh(args: string[], input?: string, environment: NodeJS.Process
   })
 }
 
-async function api<T>(
+export async function api<T>(
   path: string,
-  options: { method?: string; body?: unknown } = {},
+  options: GitHubApiOptions = {},
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<T> {
   const args = ['api', '--hostname', 'github.com', path]
+  if (options.apiVersion) args.push('--header', `X-GitHub-Api-Version: ${options.apiVersion}`)
   if (options.method) args.push('--method', options.method)
   if (options.body !== undefined) args.push('--input', '-')
   const output = await runGh(args, options.body === undefined ? undefined : JSON.stringify(options.body), environment)
@@ -487,6 +493,17 @@ export async function discoverReleasePullRequests(input: {
 }
 
 export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
+  private readonly supabase = new GitHubSupabaseOperations(
+    (path, options) => api(path, options, this.opsEnvironment()),
+    (args) => runGh(args, undefined, this.opsEnvironment()),
+  )
+  private opsEnvironment(): NodeJS.ProcessEnv {
+    return process.env.GITHUB_OPS_TOKEN ? { ...process.env, GH_TOKEN: process.env.GITHUB_OPS_TOKEN } : process.env
+  }
+  getRepositoryFile = this.supabase.getRepositoryFile.bind(this.supabase)
+  dispatchWorkflowRun = this.supabase.dispatchWorkflowRun.bind(this.supabase)
+  getWorkflowRun = this.supabase.getWorkflowRun.bind(this.supabase)
+  getWorkflowArtifact = this.supabase.getWorkflowArtifact.bind(this.supabase)
   async getPublishedReleases(repository: string): Promise<ImportedGitHubRelease[]> {
     const releases: GitHubRelease[] = []
     for (let page = 1; ; page += 1) {
@@ -537,7 +554,11 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   }
 
   async getBranchSha(repository: string, branch: string): Promise<string> {
-    const commit = await api<{ sha: string }>(`repos/${repository}/commits/${encodeURIComponent(branch)}`)
+    const commit = await api<{ sha: string }>(
+      `repos/${repository}/commits/${encodeURIComponent(branch)}`,
+      {},
+      repository === 'findmydoc-platform/ops' ? this.opsEnvironment() : process.env,
+    )
     return commit.sha
   }
 
@@ -620,6 +641,8 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   async isAncestor(repository: string, ancestor: string, branch: string): Promise<boolean> {
     const comparison = await api<{ status: string }>(
       `repos/${repository}/compare/${encodeURIComponent(ancestor)}...${encodeURIComponent(branch)}`,
+      {},
+      repository === 'findmydoc-platform/ops' ? this.opsEnvironment() : process.env,
     )
     return comparison.status === 'ahead' || comparison.status === 'identical'
   }

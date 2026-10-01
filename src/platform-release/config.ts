@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { PlatformReleaseConfig } from './types.js'
+import { validateSupabaseReleaseConfig } from './supabase-reconciliation.js'
 
 export const DEFAULT_PLATFORM_RELEASE_CONFIG_PATH = 'config/platform-release.json'
 
@@ -9,6 +10,7 @@ export async function loadPlatformReleaseConfig(
 ): Promise<PlatformReleaseConfig> {
   const parsed = JSON.parse(await readFile(resolve(path), 'utf8')) as PlatformReleaseConfig
   if (parsed.schemaVersion !== 1) throw new Error('Unsupported platform release configuration schema.')
+  if (parsed.supabaseReconciliation) validateSupabaseReleaseConfig(parsed.supabaseReconciliation)
   if (!parsed.founderOps?.baseUrl || !parsed.founderOps.ingestPath) {
     throw new Error('FounderOps release ingestion configuration is incomplete.')
   }

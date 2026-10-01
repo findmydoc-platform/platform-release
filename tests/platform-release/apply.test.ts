@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { applyPlatformRelease } from '../../src/platform-release/apply.js'
 import { computeReleaseContentDigest, renderRepositoryReleaseNotes } from '../../src/platform-release/content.js'
 import { computePlanDigest, platformDeploymentWorkflowTitle } from '../../src/platform-release/plan.js'
+import { opsBinding, opsConfig, opsFixture } from './supabase-fixture.js'
+import { reconcileSupabaseRelease } from '../../src/platform-release/supabase-reconciliation.js'
 import type {
   FounderOpsReleaseClient,
   PlatformReleaseConfig,
@@ -14,6 +16,7 @@ import type {
 } from '../../src/platform-release/types.js'
 
 const config: PlatformReleaseConfig = {
+  supabaseReconciliation: opsConfig,
   founderOps: { baseUrl: 'https://founder-ops.findmydoc.eu', ingestPath: '/api/team/platform-releases/v1/releases' },
   platformBaselineVersion: 'v0.45.0',
   repositories: {
@@ -53,6 +56,7 @@ function pullRequest(repository: string, number: number, issues: ReleaseIssue[] 
 
 function plan(): PlatformReleasePlan {
   const value: Omit<PlatformReleasePlan, 'digest'> = {
+    supabaseReconciliation: opsBinding,
     breakingChanges: [],
     createdAt: '2026-08-04T12:00:00.000Z',
     highestBump: 'minor',
@@ -113,6 +117,11 @@ function content(): PlatformReleaseContent {
 class ApplyGitHub implements PlatformReleaseGitHubClient {
   dispatches: string[] = []
   events: string[] = []
+  ops = opsFixture(this.events)
+  getRepositoryFile = this.ops.client.getRepositoryFile
+  dispatchWorkflowRun = this.ops.client.dispatchWorkflowRun
+  getWorkflowRun = this.ops.client.getWorkflowRun
+  getWorkflowArtifact = this.ops.client.getWorkflowArtifact
   manifests: string[] = []
   releases: string[] = []
   releaseDetails = new Map<
@@ -153,6 +162,7 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
     }
   }
   async dispatchWorkflow(input: { repository: string }) {
+    this.events.push(`deploy:${input.repository}`)
     this.dispatches.push(input.repository)
   }
   async getRelease(repository: string) {
@@ -228,7 +238,7 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
     throw new Error('not used')
   }
   async getBranchSha() {
-    throw new Error('not used')
+    return this.ops.client.getBranchSha()
   }
   async getLatestRelease() {
     throw new Error('not used')
@@ -272,7 +282,85 @@ function applyInput(frozenPlan = plan()) {
   }
 }
 
+const apply = (
+  input: Parameters<typeof applyPlatformRelease>[0],
+  github: ApplyGitHub,
+  founderOps: FounderOps,
+  store: PlatformReleaseAnnouncementStore,
+  options: Parameters<typeof applyPlatformRelease>[4] = {},
+) => applyPlatformRelease(input, github, founderOps, store, { ...options, supabaseRunStore: github.ops.store })
+
 describe('platform release apply', () => {
+  it.each(['missing', 'failed'])(
+    'preserves published components with verified Ops evidence and %s application evidence',
+    async (state) => {
+      const input = applyInput()
+      const github = new ApplyGitHub()
+      await reconcileSupabaseRelease(input.plan, input.confirmContentDigest, github, github.ops.store)
+      github.releaseDetails.set(config.repositories.website.repository, {
+        body: renderRepositoryReleaseNotes(input.plan, input.content, 'website'),
+        draft: false,
+        id: 1,
+        immutable: true,
+        manifestAttached: true,
+        preparedAt: '2026-10-01T12:00:00Z',
+        publishedAt: '2026-10-01T12:01:00Z',
+        sha: input.plan.repositories.website.targetSha,
+        url: 'https://example.test',
+      })
+    github.dispatches.push(config.repositories.dashboard.repository)
+    if (state === 'failed') {
+        github.dispatches.push(config.repositories.website.repository)
+        github.failureRepository = config.repositories.website.repository
+      }
+      const before = [...github.dispatches]
+      await expect(
+        apply(input, github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 }),
+      ).rejects.toThrow('Published release deployment evidence is incomplete')
+      expect(github.dispatches).toEqual(before)
+      expect(github.ops.runs.size).toBe(2)
+      expect(github.events.filter((entry) => entry.startsWith('dispatch:'))).toEqual([
+        'dispatch:preview',
+        'dispatch:production',
+      ])
+      expect(github.releases).toEqual([])
+    },
+  )
+  it('verifies all Ops configuration before any deployment and reuses those runs after deployment failure', async () => {
+    const github = new ApplyGitHub()
+    github.failureRepository = config.repositories.website.repository
+    const options = { pollIntervalMs: 0, timeoutMs: 100 }
+    await expect(
+      apply(applyInput(), github, new FounderOps(github.events), announcementStore, options),
+    ).rejects.toThrow('deployment failed')
+    expect(github.events.slice(0, 4)).toEqual([
+      'dispatch:preview',
+      'verified:preview',
+      'dispatch:production',
+      'verified:production',
+    ])
+    expect(github.ops.runs.size).toBe(2)
+    github.failureRepository = undefined
+    const result = await apply(applyInput(), github, new FounderOps(github.events), announcementStore, options)
+    expect(result.reconciliation?.environments.production.status).toBe('verified')
+    expect(github.ops.runs.size).toBe(2)
+  })
+
+  it('stops all release mutations when Preview has no authentic convergence evidence', async () => {
+    const github = new ApplyGitHub()
+    github.getWorkflowArtifact = async () => {
+      throw new Error('missing audit')
+    }
+    await expect(
+      apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
+        pollIntervalMs: 0,
+        timeoutMs: 100,
+      }),
+    ).rejects.toThrow('Ops preview')
+    expect(github.dispatches).toEqual([])
+    expect(github.releases).toEqual([])
+    expect(github.ops.runs.size).toBe(1)
+  })
   it('preserves a published component by refusing new deployments when frozen workflow evidence is missing', async () => {
     const input = applyInput()
     const github = new ApplyGitHub()
@@ -288,12 +376,13 @@ describe('platform release apply', () => {
       url: 'https://example.test',
     })
     await expect(
-      applyPlatformRelease(input, github, new FounderOps(github.events), announcementStore, {
+      apply(input, github, new FounderOps(github.events), announcementStore, {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
-    ).rejects.toThrow('Published release deployment evidence is incomplete')
+    ).rejects.toThrow('Ops preview reconciliation could not be verified')
     expect(github.dispatches).toEqual([])
+    expect(github.ops.runs.size).toBe(0)
     expect(github.releases).toEqual([])
   })
 
@@ -311,7 +400,7 @@ describe('platform release apply', () => {
       url: 'https://example.test',
     })
     await expect(
-      applyPlatformRelease(input, github, new FounderOps(github.events), announcementStore, {
+      apply(input, github, new FounderOps(github.events), announcementStore, {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
@@ -329,7 +418,7 @@ describe('platform release apply', () => {
   it('uploads byte-identical manifests before FounderOps ingestion', async () => {
     const github = new ApplyGitHub()
     const founderOps = new FounderOps(github.events)
-    const result = await applyPlatformRelease(applyInput(), github, founderOps, announcementStore, {
+    const result = await apply(applyInput(), github, founderOps, announcementStore, {
       now: () => new Date('2026-08-12T11:59:30.000Z'),
       pollIntervalMs: 0,
       timeoutMs: 100,
@@ -358,7 +447,7 @@ describe('platform release apply', () => {
     const github = new ApplyGitHub()
     github.failureRepository = 'findmydoc-platform/website'
     await expect(
-      applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+      apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
@@ -372,7 +461,7 @@ describe('platform release apply', () => {
     untrustedPlan.repositories.website.deploymentWorkflow = 'branch-controlled.yml'
     untrustedPlan.digest = computePlanDigest(untrustedPlan)
     await expect(
-      applyPlatformRelease(applyInput(untrustedPlan), github, new FounderOps(github.events), announcementStore),
+      apply(applyInput(untrustedPlan), github, new FounderOps(github.events), announcementStore),
     ).rejects.toThrow('does not match the trusted platform release configuration')
     expect(github.dispatches).toEqual([])
   })
@@ -381,7 +470,7 @@ describe('platform release apply', () => {
     const github = new ApplyGitHub()
     github.createFailureRepository = 'findmydoc-platform/website'
     await expect(
-      applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+      apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
@@ -389,7 +478,7 @@ describe('platform release apply', () => {
     expect(github.releases).toEqual(['findmydoc-platform/clinic-dashboard'])
 
     github.createFailureRepository = undefined
-    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+    await apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
       pollIntervalMs: 0,
       timeoutMs: 100,
     })
@@ -400,7 +489,7 @@ describe('platform release apply', () => {
     const github = new ApplyGitHub()
     github.manifestFailureRepository = 'findmydoc-platform/website'
     await expect(
-      applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+      apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
@@ -409,7 +498,7 @@ describe('platform release apply', () => {
     expect(github.events.filter((event) => event.startsWith('publish:'))).toEqual([])
 
     github.manifestFailureRepository = undefined
-    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+    await apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
       pollIntervalMs: 0,
       timeoutMs: 100,
     })
@@ -420,7 +509,7 @@ describe('platform release apply', () => {
     const github = new ApplyGitHub()
     github.publishFailureRepository = 'findmydoc-platform/website'
     await expect(
-      applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+      apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
@@ -430,7 +519,7 @@ describe('platform release apply', () => {
     expect(github.releaseDetails.get('findmydoc-platform/website')?.draft).toBe(true)
 
     github.publishFailureRepository = undefined
-    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+    await apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
       pollIntervalMs: 0,
       timeoutMs: 100,
     })
@@ -440,7 +529,7 @@ describe('platform release apply', () => {
 
   it('fails closed when a published immutable release is missing its manifest', async () => {
     const github = new ApplyGitHub()
-    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+    await apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
       pollIntervalMs: 0,
       timeoutMs: 100,
     })
@@ -453,7 +542,7 @@ describe('platform release apply', () => {
     github.manifestByRepository.delete('findmydoc-platform/clinic-dashboard')
 
     await expect(
-      applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+      apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
@@ -464,7 +553,7 @@ describe('platform release apply', () => {
     const github = new ApplyGitHub()
     github.manifestFailureRepository = 'findmydoc-platform/clinic-dashboard'
     await expect(
-      applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+      apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
@@ -473,7 +562,7 @@ describe('platform release apply', () => {
 
     github.manifestByRepository.set('findmydoc-platform/website', github.lastManifestAttempt ?? '')
     github.manifestFailureRepository = undefined
-    await applyPlatformRelease(applyInput(), github, new FounderOps(github.events), announcementStore, {
+    await apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
       pollIntervalMs: 0,
       timeoutMs: 100,
     })
@@ -486,14 +575,14 @@ describe('platform release apply', () => {
   it('resumes after FounderOps failure with an identical manifest and no duplicate releases', async () => {
     const github = new ApplyGitHub()
     await expect(
-      applyPlatformRelease(applyInput(), github, new FounderOps(github.events, true), announcementStore, {
+      apply(applyInput(), github, new FounderOps(github.events, true), announcementStore, {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
     ).rejects.toThrow('FounderOps failed')
     const firstManifest = github.manifests[0]
     const replay = new FounderOps(github.events)
-    await applyPlatformRelease(applyInput(), github, replay, announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
+    await apply(applyInput(), github, replay, announcementStore, { pollIntervalMs: 0, timeoutMs: 100 })
     expect(github.releases).toHaveLength(2)
     expect(github.manifests.every((manifest) => manifest === firstManifest)).toBe(true)
     expect(replay.calls).toBe(1)

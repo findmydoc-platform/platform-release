@@ -6,8 +6,10 @@ This repository contains only the deterministic release engine, reusable deploym
 
 Internal operating documentation is maintained in the Operations repository.
 
-The Ops-owned Supabase reconciliation integration is in preparation. This branch blocks `apply` until the actual Ops
-workflow contract is available. See [the integration boundary](docs/supabase-reconciliation.md).
+Platform release plans freeze the Ops source and complete opted-in Supabase scope. Approved applies reconcile Preview,
+then Production, before deploying applications. The Runner verifies each exact workflow run's audited convergence
+and reuses those runs on resume. See [the reconciliation contract](docs/supabase-reconciliation.md) for approval,
+evidence, recovery, and GitHub App installation prerequisites.
 
 ## Website package access
 
