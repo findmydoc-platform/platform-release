@@ -34,9 +34,9 @@ the binding. Already published releases cannot acquire missing reconciliation ev
 Immediately before each new dispatch, the Runner requires current Ops `main` to equal the approved Ops SHA and checks
 its workflow bytes. An Ops commit advancing before a pending dispatch requires a new frozen plan and release approval.
 Recorded runs can still resume against their original frozen source. The main-only Ops-v1 API does not atomically bind
-the GET preflight to the POST dispatch; enforcement before credentials also requires an Ops-side execution-head guard.
-Protected trusted `main` remains the source trust boundary. A guard inside an arbitrarily replaced privileged workflow
-cannot secure that replacement. Source preparation alone does not prove this operational boundary.
+the GET preflight to the POST dispatch. The merged Ops execution-head guard rejects a different `GITHUB_SHA` before
+environment/source outputs, so the dependent credential job cannot start. Protected trusted `main` remains the source
+trust boundary. A guard inside an arbitrarily replaced privileged workflow cannot secure that replacement.
 
 ## Verified outcomes
 
@@ -106,6 +106,9 @@ cannot prove them. Hosted read-only dry-runs establish connectivity and report d
 Full release acceptance requires a real approved apply and verified artifacts.
 
 Implementation references are [Runner #37](https://github.com/findmydoc-platform/platform-release/issues/37) and
-[Ops #76](https://github.com/findmydoc-platform/ops/issues/76). The Ops v1 contract was inspected at
-`f3deafd54970e4fad48a1e59cc24e39e0b4c8b3f`. New plans freeze current trusted source rather than permanently pinning future
-releases to that adoption commit.
+[Ops #76](https://github.com/findmydoc-platform/ops/issues/76). The base Ops v1 contract was inspected at
+`f3deafd54970e4fad48a1e59cc24e39e0b4c8b3f`; the execution-head guard in
+[Ops PR #79](https://github.com/findmydoc-platform/ops/pull/79) was verified at merged source
+`0d90071c5d2fe564b5c97e4405534b3cd41e22a1`. The actual Runner binding against Main confirmed that source and both complete
+target scopes through read-only GitHub requests. New plans freeze current trusted source rather than permanently
+pinning future releases to an adoption commit.
