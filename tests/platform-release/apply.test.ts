@@ -308,8 +308,8 @@ describe('platform release apply', () => {
         sha: input.plan.repositories.website.targetSha,
         url: 'https://example.test',
       })
-    github.dispatches.push(config.repositories.dashboard.repository)
-    if (state === 'failed') {
+      github.dispatches.push(config.repositories.dashboard.repository)
+      if (state === 'failed') {
         github.dispatches.push(config.repositories.website.repository)
         github.failureRepository = config.repositories.website.repository
       }
