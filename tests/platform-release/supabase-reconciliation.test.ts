@@ -174,6 +174,24 @@ function reconciliationFixture() {
 }
 
 describe('Ops-owned Supabase release reconciliation', () => {
+  it('rejects a different execution SHA even when workflow bytes and frozen reconciliation outcomes match', async () => {
+    const fixture = opsFixture()
+    const read = fixture.client.getWorkflowRun
+    const github = {
+      ...fixture.client,
+      async isAncestor() {
+        return true
+      },
+      async getWorkflowRun(repository: string, id: number) {
+        return { ...(await read(repository, id)), headSha: 'a'.repeat(40) }
+      },
+    } as unknown as PlatformReleaseGitHubClient
+    await expect(reconcileSupabaseRelease(frozenPlan, contentDigest, github, fixture.store)).rejects.toThrow(
+      'Ops preview',
+    )
+    expect(fixture.runs.size).toBe(1)
+    expect(fixture.events).toEqual(['dispatch:preview'])
+  })
   it.each(['preview', 'production'])('checks current main before a new %s intent and dispatch', async (environment) => {
     const fixture = opsFixture()
     const advancedSha = 'a'.repeat(40)

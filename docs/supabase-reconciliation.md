@@ -41,7 +41,7 @@ cannot secure that replacement. Source preparation alone does not prove this ope
 ## Verified outcomes
 
 The Runner pins the [GitHub dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
-to version `2026-03-10`, which returns an exact run ID. It verifies the main branch, trusted head SHA, workflow bytes,
+to version `2026-03-10`, which returns an exact run ID. It verifies the main branch, exact approved head SHA, workflow bytes,
 event, title, attempt, URL, and successful conclusion. It downloads the unique, unexpired
 `supabase-auth-config-<run-id>-<run-attempt>` artifact and verifies every file's checksum.
 

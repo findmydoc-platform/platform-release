@@ -280,6 +280,7 @@ async function validateOpsRun(
     run.event !== 'workflow_dispatch' ||
     run.headBranch !== binding.branch ||
     !HEX_SHA.test(run.headSha ?? '') ||
+    run.headSha !== binding.opsSha ||
     run.path !== `.github/workflows/${binding.workflow}` ||
     run.displayTitle !== `Supabase Auth Config release apply ${run.databaseId}` ||
     run.url !== `https://github.com/${binding.repository}/actions/runs/${run.databaseId}` ||
