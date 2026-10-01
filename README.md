@@ -6,6 +6,11 @@ This repository contains only the deterministic release engine, reusable deploym
 
 Internal operating documentation is maintained in the Operations repository.
 
+Platform release plans freeze the Ops source and complete opted-in Supabase scope. Approved applies reconcile Preview,
+then Production, before deploying applications. The Runner verifies each exact workflow run's audited convergence
+and reuses those runs on resume. See [the reconciliation contract](docs/supabase-reconciliation.md) for approval,
+evidence, recovery, and GitHub App installation prerequisites.
+
 ## Website package access
 
 The Website reusable deployment workflow requires the caller secret `GH_PACKAGES_READ_TOKEN` with private package read access.

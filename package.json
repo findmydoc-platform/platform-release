@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier --write",
     "test": "vitest run",
     "test:watch": "vitest",
     "platform-release": "tsx src/cli.ts"
@@ -18,6 +19,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "prettier": "3.9.9",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^4.0.14",

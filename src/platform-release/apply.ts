@@ -1,30 +1,52 @@
 import { announcePlatformReleaseOnce } from './announce.js'
 import { computeReleaseContentDigest, renderRepositoryReleaseNotes, validateReleaseContent } from './content.js'
 import { createPlatformReleaseManifestV3, serializeReleaseManifest } from './manifest.js'
-import {
-  platformDeploymentWorkflowTitle,
-  validatePlanAgainstConfig,
-  validatePlatformReleasePlan,
-} from './plan.js'
+import { platformDeploymentWorkflowTitle, validatePlanAgainstConfig, validatePlatformReleasePlan } from './plan.js'
+import { reconcileSupabaseRelease } from './supabase-reconciliation.js'
 import type {
   PlatformReleaseApplyResult,
   PlatformReleaseConfig,
   PlatformReleaseContent,
+  PlatformReleaseDetails,
   PlatformReleaseAnnouncementStore,
   FounderOpsReleaseClient,
   PlatformReleaseGitHubClient,
   PlatformReleasePlan,
   PlatformRepositoryKey,
   WorkflowRun,
+  SupabaseReleaseAttestation,
+  SupabaseReleaseRunStore,
 } from './types.js'
 
 const REPOSITORY_KEYS: PlatformRepositoryKey[] = ['dashboard', 'website']
-const RELEASE_METADATA_MARKER = /\n*<!--\s*findmydoc-platform-(?:announcement:(?:pending|sent)|published-at:[^\s>]+)\s*-->\s*$/
+const RELEASE_METADATA_MARKER =
+  /\n*<!--\s*findmydoc-platform-(?:announcement:(?:pending|sent)|published-at:[^\s>]+)\s*-->\s*$/
 
 export function releaseNotesBody(body: string): string {
   let value = body
   while (RELEASE_METADATA_MARKER.test(value)) value = value.replace(RELEASE_METADATA_MARKER, '')
   return value.trim()
+}
+
+function validateExistingRelease(
+  plan: PlatformReleasePlan,
+  content: PlatformReleaseContent,
+  key: PlatformRepositoryKey,
+  existing: PlatformReleaseDetails | undefined,
+): void {
+  if (!existing) return
+  const repository = plan.repositories[key]
+  if (existing.sha !== repository.targetSha) {
+    throw new Error(`${repository.repository} ${plan.version} points to ${existing.sha}, not ${repository.targetSha}.`)
+  }
+  if (!existing.draft && existing.immutable && !existing.manifestAttached) {
+    throw new Error(
+      `${repository.repository} ${plan.version} is immutable and missing platform-release.json; publish a new platform version after fixing the runner.`,
+    )
+  }
+  if (releaseNotesBody(existing.body) !== renderRepositoryReleaseNotes(plan, content, key).trim()) {
+    throw new Error(`${repository.repository} ${plan.version} release notes do not match the approved content.`)
+  }
 }
 
 const delay = (milliseconds: number) => new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds))
@@ -64,7 +86,7 @@ async function ensureDeployment(
   plan: PlatformReleasePlan,
   key: PlatformRepositoryKey,
   github: PlatformReleaseGitHubClient,
-  options: { pollIntervalMs: number; timeoutMs: number },
+  options: { allowDispatch?: boolean; pollIntervalMs: number; timeoutMs: number },
 ): Promise<WorkflowRun> {
   const repository = plan.repositories[key]
   const existing = await github.findWorkflowRun({
@@ -74,6 +96,9 @@ async function ensureDeployment(
     workflow: repository.deploymentWorkflow,
   })
   if (existing?.status === 'completed' && existing.conclusion === 'success') return existing
+  if (options.allowDispatch === false) {
+    throw new Error('Published release deployment evidence is incomplete; corrective recovery is required.')
+  }
   let ignoreRunId: number | undefined
   if (!existing || existing.status === 'completed') {
     if (existing?.conclusion !== 'success') ignoreRunId = existing?.databaseId
@@ -101,16 +126,22 @@ export async function applyPlatformRelease(
     confirmVersion: string
     content: PlatformReleaseContent
     onManifest?: (manifest: string) => Promise<void>
+    onReconciliation?: (attestation: SupabaseReleaseAttestation) => Promise<void>
     plan: PlatformReleasePlan
     webhook?: string
   },
   github: PlatformReleaseGitHubClient,
   founderOps: FounderOpsReleaseClient,
   announcementStore: PlatformReleaseAnnouncementStore,
-  options: { now?: () => Date; pollIntervalMs?: number; timeoutMs?: number } = {},
+  options: {
+    now?: () => Date
+    pollIntervalMs?: number
+    timeoutMs?: number
+    supabaseRunStore?: SupabaseReleaseRunStore
+  } = {},
 ): Promise<PlatformReleaseApplyResult> {
   validatePlatformReleasePlan(input.plan)
-  validatePlanAgainstConfig(input.plan, input.config)
+  validatePlanAgainstConfig(input.plan, input.config, true)
   const content = validateReleaseContent(input.plan, input.content)
   const contentDigest = computeReleaseContentDigest(content)
   if (input.confirmDigest !== input.plan.digest) {
@@ -126,46 +157,70 @@ export async function applyPlatformRelease(
 
   for (const key of REPOSITORY_KEYS) {
     const repository = input.plan.repositories[key]
-    if (!await github.isAncestor(repository.repository, repository.targetSha, repository.branch)) {
-      throw new Error(`Frozen target ${repository.targetSha} is no longer reachable from ${repository.repository}:${repository.branch}.`)
+    if (!(await github.isAncestor(repository.repository, repository.targetSha, repository.branch))) {
+      throw new Error(
+        `Frozen target ${repository.targetSha} is no longer reachable from ${repository.repository}:${repository.branch}.`,
+      )
     }
   }
 
+  let hasPublishedComponent = false
+  for (const key of REPOSITORY_KEYS) {
+    const existing = await github.getRelease(input.plan.repositories[key].repository, input.plan.version)
+    validateExistingRelease(input.plan, content, key, existing)
+    hasPublishedComponent ||= existing?.draft === false
+  }
+
   const workflowOptions = {
+    allowDispatch: !hasPublishedComponent,
     pollIntervalMs: options.pollIntervalMs ?? 10_000,
     timeoutMs: options.timeoutMs ?? 45 * 60_000,
   }
-  const workflowEntries = await Promise.all(REPOSITORY_KEYS.map(async (key) =>
-    [key, await ensureDeployment(input.plan, key, github, workflowOptions)] as const))
+  if (!options.supabaseRunStore) throw new Error('Durable Ops invocation mapping is required before apply.')
+  const reconciliation = await reconcileSupabaseRelease(
+    input.plan,
+    contentDigest,
+    github,
+    options.supabaseRunStore,
+    workflowOptions,
+  )
+  await input.onReconciliation?.(reconciliation)
+  const workflowEntries = await Promise.all(
+    REPOSITORY_KEYS.map(
+      async (key) => [key, await ensureDeployment(input.plan, key, github, workflowOptions)] as const,
+    ),
+  )
   const workflows = Object.fromEntries(workflowEntries) as PlatformReleaseApplyResult['workflows']
 
-  const releaseEntries: Array<readonly [PlatformRepositoryKey, Awaited<ReturnType<PlatformReleaseGitHubClient['createDraftRelease']>>]> = []
+  const releaseEntries: Array<
+    readonly [PlatformRepositoryKey, Awaited<ReturnType<PlatformReleaseGitHubClient['createDraftRelease']>>]
+  > = []
   for (const key of REPOSITORY_KEYS) {
     const repository = input.plan.repositories[key]
     const expectedBody = renderRepositoryReleaseNotes(input.plan, content, key)
     const existing = await github.getRelease(repository.repository, input.plan.version)
-    if (existing && existing.sha !== repository.targetSha) {
-      throw new Error(`${repository.repository} ${input.plan.version} points to ${existing.sha}, not ${repository.targetSha}.`)
-    }
-    if (existing && !existing.draft && existing.immutable && !existing.manifestAttached) {
-      throw new Error(
-        `${repository.repository} ${input.plan.version} is immutable and missing platform-release.json; publish a new platform version after fixing the runner.`,
-      )
-    }
-    if (existing && releaseNotesBody(existing.body) !== expectedBody.trim()) {
-      throw new Error(`${repository.repository} ${input.plan.version} release notes do not match the approved content.`)
-    }
-    const release = existing ?? await github.createDraftRelease({
-      body: expectedBody,
-      repository: repository.repository,
-      targetSha: repository.targetSha,
-      version: input.plan.version,
-    })
+    validateExistingRelease(input.plan, content, key, existing)
+    const release =
+      existing ??
+      (await github.createDraftRelease({
+        body: expectedBody,
+        repository: repository.repository,
+        targetSha: repository.targetSha,
+        version: input.plan.version,
+      }))
     releaseEntries.push([key, release])
   }
-  const releaseDetails = Object.fromEntries(releaseEntries) as Record<PlatformRepositoryKey, Awaited<ReturnType<PlatformReleaseGitHubClient['createDraftRelease']>>>
-  const existingPlatformPublishedAt = [...new Set(REPOSITORY_KEYS.flatMap((key) =>
-    releaseDetails[key].platformPublishedAt ? [releaseDetails[key].platformPublishedAt] : []))]
+  const releaseDetails = Object.fromEntries(releaseEntries) as Record<
+    PlatformRepositoryKey,
+    Awaited<ReturnType<PlatformReleaseGitHubClient['createDraftRelease']>>
+  >
+  const existingPlatformPublishedAt = [
+    ...new Set(
+      REPOSITORY_KEYS.flatMap((key) =>
+        releaseDetails[key].platformPublishedAt ? [releaseDetails[key].platformPublishedAt] : [],
+      ),
+    ),
+  ]
   if (existingPlatformPublishedAt.length > 1) {
     throw new Error(`${input.plan.version} releases have conflicting platform publication metadata.`)
   }
@@ -174,7 +229,9 @@ export async function applyPlatformRelease(
     const release = releaseDetails[key]
     if (release.platformPublishedAt === platformPublishedAt) continue
     if (!release.draft) {
-      throw new Error(`${input.plan.repositories[key].repository} ${input.plan.version} is published without stable platform publication metadata.`)
+      throw new Error(
+        `${input.plan.repositories[key].repository} ${input.plan.version} is published without stable platform publication metadata.`,
+      )
     }
     releaseDetails[key] = await github.setReleasePlatformPublishedAt({
       platformPublishedAt,
@@ -212,13 +269,18 @@ export async function applyPlatformRelease(
       })
     }
     const published = await github.getRelease(input.plan.repositories[key].repository, input.plan.version)
-    if (!published) throw new Error(`${input.plan.repositories[key].repository} ${input.plan.version} is missing after publication.`)
+    if (!published)
+      throw new Error(`${input.plan.repositories[key].repository} ${input.plan.version} is missing after publication.`)
     releaseDetails[key] = published
     if (releaseDetails[key].draft || !releaseDetails[key].publishedAt || !releaseDetails[key].manifestAttached) {
-      throw new Error(`${input.plan.repositories[key].repository} ${input.plan.version} is not published with its manifest.`)
+      throw new Error(
+        `${input.plan.repositories[key].repository} ${input.plan.version} is not published with its manifest.`,
+      )
     }
   }
-  const releases = Object.fromEntries(REPOSITORY_KEYS.map((key) => [key, { url: releaseDetails[key].url }])) as PlatformReleaseApplyResult['releases']
+  const releases = Object.fromEntries(
+    REPOSITORY_KEYS.map((key) => [key, { url: releaseDetails[key].url }]),
+  ) as PlatformReleaseApplyResult['releases']
   const founderOpsResult = await founderOps.ingestManifest({
     manifest: serializedManifest,
     manifestDigest: manifest.manifestDigest,
@@ -226,14 +288,19 @@ export async function applyPlatformRelease(
 
   let announcement: PlatformReleaseApplyResult['announcement'] = 'skipped'
   if (input.announce) {
-    announcement = await announcePlatformReleaseOnce({
-      founderOpsUrl: founderOpsResult.url,
-      manifest,
-      webhook: input.webhook ?? '',
-    }, github, announcementStore)
+    announcement = await announcePlatformReleaseOnce(
+      {
+        founderOpsUrl: founderOpsResult.url,
+        manifest,
+        webhook: input.webhook ?? '',
+      },
+      github,
+      announcementStore,
+    )
   }
 
   return {
+    reconciliation,
     announcement,
     contentDigest,
     digest: input.plan.digest,

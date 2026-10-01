@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createPlatformReleasePlan, validatePlatformReleasePlan } from '../../src/platform-release/plan.js'
+import { opsConfig, opsSha, opsWorkflow, managedFields } from './supabase-fixture.js'
 import type {
   PlatformReleaseConfig,
   PlatformReleaseGitHubClient,
@@ -44,7 +45,9 @@ class PlanningGitHub implements PlatformReleaseGitHubClient {
   async getBranchSha(repository: string) {
     return repository.endsWith('/website') ? 'website-target' : 'dashboard-target'
   }
-  async isAncestor() { return true }
+  async isAncestor() {
+    return true
+  }
   async compareCommits(repository: string) {
     if (this.breaking && repository.endsWith('/website')) {
       return [{ ...commit('breaking', 'feat!: replace API'), bump: 'major' as const }]
@@ -53,18 +56,74 @@ class PlanningGitHub implements PlatformReleaseGitHubClient {
       ? [commit('website-commit', 'feat(reviews): add public reviews')]
       : [commit('dashboard-commit', 'fix(reviews): correct moderation state')]
   }
-  async getPullRequests() { return [] }
-  async createDraftRelease() { throw new Error('not used') }
-  async dispatchWorkflow() { throw new Error('not used') }
-  async findWorkflowRun() { return undefined }
-  async getRelease() { return undefined }
-  async getReleaseManifest() { return undefined }
-  async ensureReleaseManifest() { throw new Error('not used') }
-  async publishRelease() { throw new Error('not used') }
-  async setReleasePlatformPublishedAt() { throw new Error('not used') }
+  async getPullRequests() {
+    return []
+  }
+  async createDraftRelease() {
+    throw new Error('not used')
+  }
+  async dispatchWorkflow() {
+    throw new Error('not used')
+  }
+  async findWorkflowRun() {
+    return undefined
+  }
+  async getRelease() {
+    return undefined
+  }
+  async getReleaseManifest() {
+    return undefined
+  }
+  async ensureReleaseManifest() {
+    throw new Error('not used')
+  }
+  async publishRelease() {
+    throw new Error('not used')
+  }
+  async setReleasePlatformPublishedAt() {
+    throw new Error('not used')
+  }
 }
 
 describe('platform release planning', () => {
+  it('includes the frozen Ops source and full managed scope in the release approval digest', async () => {
+    const base = new PlanningGitHub()
+    let sourceSha = opsSha
+    const github = Object.assign(base, {
+      async getBranchSha(repository: string) {
+        return repository === opsConfig.repository
+          ? sourceSha
+          : repository.endsWith('/website')
+            ? 'website-target'
+            : 'dashboard-target'
+      },
+      async getRepositoryFile(_repository: string, path: string) {
+        if (path.startsWith('.github/')) return opsWorkflow
+        if (path.includes('/profiles/'))
+          return JSON.stringify({
+            version: 1,
+            id: 'shared-auth-mail',
+            managedFields: managedFields.filter((field) => field.startsWith('mailer_')),
+          })
+        const production = path.endsWith('production.json')
+        return JSON.stringify({
+          version: 1,
+          id: production ? 'production' : 'staging',
+          profileId: 'shared-auth-mail',
+          projectRef: (production ? 'p' : 's').repeat(20),
+          applyProtection: production ? 'protected' : 'standard',
+          authRouting: {},
+          nativeMailSuppression: true,
+        })
+      },
+    })
+    const first = await createPlatformReleasePlan({ config: { ...config, supabaseReconciliation: opsConfig } }, github)
+    expect(first.supabaseReconciliation).toMatchObject({ opsSha, targets: { production: { managedFields } } })
+    sourceSha = '0'.repeat(40)
+    expect(
+      (await createPlatformReleasePlan({ config: { ...config, supabaseReconciliation: opsConfig } }, github)).digest,
+    ).not.toBe(first.digest)
+  })
   it('freezes both repositories and selects the highest combined bump', async () => {
     const plan = await createPlatformReleasePlan({ config }, new PlanningGitHub())
     expect(plan.version).toBe('v0.46.0')

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bumpForMessage, compareVersions, parseVersion } from './semver.js'
 import { extractReleaseVisuals } from './visuals.js'
+import { GitHubSupabaseOperations } from './supabase-github.js'
 import type {
   PlatformReleaseAnnouncementStore,
   PlatformReleaseGitHubClient,
@@ -74,7 +75,7 @@ type GitHubDeploymentStatus = {
   state?: string
 }
 
-type GitHubApiOptions = { method?: string; body?: unknown }
+type GitHubApiOptions = { method?: string; body?: unknown; apiVersion?: string }
 type GitHubApiRequest = <T>(path: string, options?: GitHubApiOptions) => Promise<T>
 
 const WORKFLOW_RUNS_PAGE_SIZE = 100
@@ -110,7 +111,10 @@ export async function findWorkflowRunInPages(
 }
 
 class GhError extends Error {
-  constructor(message: string, readonly stderr: string) {
+  constructor(
+    message: string,
+    readonly stderr: string,
+  ) {
     super(message)
   }
 }
@@ -144,7 +148,9 @@ export function githubChildEnvironment(environment: NodeJS.ProcessEnv = process.
     'USERPROFILE',
     'XDG_CONFIG_HOME',
   ] as const
-  return Object.fromEntries(allowlist.flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]]]))
+  return Object.fromEntries(
+    allowlist.flatMap((key) => (environment[key] === undefined ? [] : [[key, environment[key]]])),
+  )
 }
 
 export function assertLinearReleaseComparison(
@@ -166,20 +172,26 @@ export function verifiedSquashMergePullRequestNumber(
   const subject = commit.message.split('\n', 1)[0]?.trim() ?? ''
   const referencedNumber = Number(subject.match(/\(#([1-9]\d*)\)$/)?.[1])
   const mergeSubject = mergeCommitMessage?.split('\n', 1)[0]?.trim()
-  if (referencedNumber !== pullRequest.number || !pullRequest.merged_at ||
-    (pullRequest.merge_commit_sha !== commit.sha && (!hasEquivalentFiles || mergeSubject !== subject))) {
+  if (
+    referencedNumber !== pullRequest.number ||
+    !pullRequest.merged_at ||
+    (pullRequest.merge_commit_sha !== commit.sha && (!hasEquivalentFiles || mergeSubject !== subject))
+  ) {
     return undefined
   }
   return pullRequest.number
 }
 
 export function haveEquivalentCommitFiles(left: GitHubCommitFile[], right: GitHubCommitFile[]): boolean {
-  const normalize = (files: GitHubCommitFile[]) => files.map((file) => ({
-    filename: file.filename,
-    previous_filename: file.previous_filename ?? null,
-    sha: file.sha,
-    status: file.status,
-  })).sort((first, second) => JSON.stringify(first).localeCompare(JSON.stringify(second)))
+  const normalize = (files: GitHubCommitFile[]) =>
+    files
+      .map((file) => ({
+        filename: file.filename,
+        previous_filename: file.previous_filename ?? null,
+        sha: file.sha,
+        status: file.status,
+      }))
+      .sort((first, second) => JSON.stringify(first).localeCompare(JSON.stringify(second)))
   return left.length > 0 && JSON.stringify(normalize(left)) === JSON.stringify(normalize(right))
 }
 
@@ -199,7 +211,11 @@ export async function collectCommitEvidence(
   return { complete: false, files, message: message ?? '' }
 }
 
-async function runGh(args: string[], input?: string, environment: NodeJS.ProcessEnv = process.env): Promise<string> {
+export async function runGh(
+  args: string[],
+  input?: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn('gh', args, {
       env: githubChildEnvironment(environment),
@@ -209,8 +225,12 @@ async function runGh(args: string[], input?: string, environment: NodeJS.Process
     let stderr = ''
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk: string) => { stdout += chunk })
-    child.stderr.on('data', (chunk: string) => { stderr += chunk })
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk
+    })
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk
+    })
     child.on('error', (error) => rejectRun(new GhError(error.message, stderr)))
     child.on('close', (code) => {
       if (code === 0) resolveRun(stdout)
@@ -221,16 +241,17 @@ async function runGh(args: string[], input?: string, environment: NodeJS.Process
   })
 }
 
-async function api<T>(
+export async function api<T>(
   path: string,
-  options: { method?: string; body?: unknown } = {},
+  options: GitHubApiOptions = {},
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<T> {
   const args = ['api', '--hostname', 'github.com', path]
+  if (options.apiVersion) args.push('--header', `X-GitHub-Api-Version: ${options.apiVersion}`)
   if (options.method) args.push('--method', options.method)
   if (options.body !== undefined) args.push('--input', '-')
   const output = await runGh(args, options.body === undefined ? undefined : JSON.stringify(options.body), environment)
-  return output.trim() ? JSON.parse(output) as T : undefined as T
+  return output.trim() ? (JSON.parse(output) as T) : (undefined as T)
 }
 
 async function optionalApi<T>(path: string): Promise<T | undefined> {
@@ -243,7 +264,9 @@ async function optionalApi<T>(path: string): Promise<T | undefined> {
 }
 
 async function resolveTagSha(repository: string, tag: string): Promise<string> {
-  let object = (await api<{ object: { sha: string; type: string } }>(`repos/${repository}/git/ref/tags/${encodeURIComponent(tag)}`)).object
+  let object = (
+    await api<{ object: { sha: string; type: string } }>(`repos/${repository}/git/ref/tags/${encodeURIComponent(tag)}`)
+  ).object
   for (let depth = 0; object.type === 'tag'; depth += 1) {
     if (depth >= 10) throw new Error(`${repository} ${tag} exceeds the supported annotated-tag depth.`)
     object = (await api<{ object: { sha: string; type: string } }>(`repos/${repository}/git/tags/${object.sha}`)).object
@@ -253,9 +276,11 @@ async function resolveTagSha(repository: string, tag: string): Promise<string> {
 }
 
 async function commitEvidence(repository: string, sha: string): Promise<GitHubCommitEvidence> {
-  return collectCommitEvidence(async (page, perPage) => api<{ commit: { message: string }; files?: GitHubCommitFile[] }>(
-    `repos/${repository}/commits/${sha}?per_page=${perPage}&page=${page}`,
-  ))
+  return collectCommitEvidence(async (page, perPage) =>
+    api<{ commit: { message: string }; files?: GitHubCommitFile[] }>(
+      `repos/${repository}/commits/${sha}?per_page=${perPage}&page=${page}`,
+    ),
+  )
 }
 
 function releaseUrl(repository: string, version: string): string {
@@ -263,16 +288,21 @@ function releaseUrl(repository: string, version: string): string {
 }
 
 function isVersionReleaseCandidate(release: GitHubRelease, version: string): boolean {
-  return release.tag_name === version || (
-    release.draft === true &&
-    release.name === `findmydoc ${version}` &&
-    /^untagged-[0-9a-f]+$/.test(release.tag_name ?? '')
+  return (
+    release.tag_name === version ||
+    (release.draft === true &&
+      release.name === `findmydoc ${version}` &&
+      /^untagged-[0-9a-f]+$/.test(release.tag_name ?? ''))
   )
 }
 
-export function selectReleaseIncludingDraft(releases: readonly GitHubRelease[], version: string): GitHubRelease | undefined {
+export function selectReleaseIncludingDraft(
+  releases: readonly GitHubRelease[],
+  version: string,
+): GitHubRelease | undefined {
   const candidates = releases.filter((release) => isVersionReleaseCandidate(release, version))
-  if (candidates.length > 1) throw new Error(`Multiple GitHub releases match ${version}; manual inspection is required.`)
+  if (candidates.length > 1)
+    throw new Error(`Multiple GitHub releases match ${version}; manual inspection is required.`)
   return candidates[0]
 }
 
@@ -328,12 +358,20 @@ async function closingIssues(repository: string, number: number): Promise<Releas
     `number=${number}`,
   ])
   const parsed = JSON.parse(output) as {
-    data?: { repository?: { pullRequest?: { closingIssuesReferences?: { nodes?: Array<{
-      number: number
-      repository: { nameWithOwner: string }
-      title: string
-      url: string
-    }> } } } }
+    data?: {
+      repository?: {
+        pullRequest?: {
+          closingIssuesReferences?: {
+            nodes?: Array<{
+              number: number
+              repository: { nameWithOwner: string }
+              title: string
+              url: string
+            }>
+          }
+        }
+      }
+    }
   }
   return (parsed.data?.repository?.pullRequest?.closingIssuesReferences?.nodes ?? []).map((issue) => ({
     number: issue.number,
@@ -359,7 +397,10 @@ function compactPullRequestBody(markdown: string): string {
     const match = line.match(/^(#{1,6})\s+(.+)$/)
     if (match) {
       const level = match[1]?.length ?? 0
-      const title = (match[2] ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+      const title = (match[2] ?? '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim()
       if (active && level <= active.level) flush()
       if (!active && wanted.has(title)) active = { level, lines: [line] }
       else active?.lines.push(line)
@@ -406,10 +447,17 @@ export async function discoverReleasePullRequests(input: {
               evidenceFor(candidate.merge_commit_sha),
             ])
             mergeCommitMessage = mergeEvidence.message
-            hasEquivalentFiles = releasedEvidence.complete && mergeEvidence.complete &&
+            hasEquivalentFiles =
+              releasedEvidence.complete &&
+              mergeEvidence.complete &&
               haveEquivalentCommitFiles(releasedEvidence.files, mergeEvidence.files)
           }
-          const verifiedNumber = verifiedSquashMergePullRequestNumber(commit, candidate, hasEquivalentFiles, mergeCommitMessage)
+          const verifiedNumber = verifiedSquashMergePullRequestNumber(
+            commit,
+            candidate,
+            hasEquivalentFiles,
+            mergeCommitMessage,
+          )
           if (verifiedNumber !== undefined) {
             pullRequestNumbers.push(verifiedNumber)
             pullRequestDetails.set(verifiedNumber, candidate)
@@ -426,7 +474,7 @@ export async function discoverReleasePullRequests(input: {
 
   const pullRequests: ReleasePullRequest[] = []
   for (const number of [...commitsByPullRequest.keys()].sort((left, right) => left - right)) {
-    const pull = pullRequestDetails.get(number) ?? await input.getPullRequest(number)
+    const pull = pullRequestDetails.get(number) ?? (await input.getPullRequest(number))
     if (!pull) throw new Error(`${input.repository} pull request #${number} is unavailable.`)
     if (!pull.merged_at) continue
     const body = pull.body ?? ''
@@ -445,6 +493,17 @@ export async function discoverReleasePullRequests(input: {
 }
 
 export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
+  private readonly supabase = new GitHubSupabaseOperations(
+    (path, options) => api(path, options, this.opsEnvironment()),
+    (args) => runGh(args, undefined, this.opsEnvironment()),
+  )
+  private opsEnvironment(): NodeJS.ProcessEnv {
+    return process.env.GITHUB_OPS_TOKEN ? { ...process.env, GH_TOKEN: process.env.GITHUB_OPS_TOKEN } : process.env
+  }
+  getRepositoryFile = this.supabase.getRepositoryFile.bind(this.supabase)
+  dispatchWorkflowRun = this.supabase.dispatchWorkflowRun.bind(this.supabase)
+  getWorkflowRun = this.supabase.getWorkflowRun.bind(this.supabase)
+  getWorkflowArtifact = this.supabase.getWorkflowArtifact.bind(this.supabase)
   async getPublishedReleases(repository: string): Promise<ImportedGitHubRelease[]> {
     const releases: GitHubRelease[] = []
     for (let page = 1; ; page += 1) {
@@ -461,13 +520,17 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
         return false
       }
     })
-    return Promise.all(eligible.sort((left, right) => compareVersions(left.tag_name ?? '', right.tag_name ?? '')).map(async (release) => ({
-      body: release.body ?? '',
-      publishedAt: release.published_at!,
-      releaseUrl: releaseUrl(repository, release.tag_name!),
-      targetSha: await resolveTagSha(repository, release.tag_name!),
-      version: release.tag_name!,
-    })))
+    return Promise.all(
+      eligible
+        .sort((left, right) => compareVersions(left.tag_name ?? '', right.tag_name ?? ''))
+        .map(async (release) => ({
+          body: release.body ?? '',
+          publishedAt: release.published_at!,
+          releaseUrl: releaseUrl(repository, release.tag_name!),
+          targetSha: await resolveTagSha(repository, release.tag_name!),
+          version: release.tag_name!,
+        })),
+    )
   }
 
   async getAllCommits(repository: string, head: string): Promise<ReleaseCommit[]> {
@@ -476,12 +539,14 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
       const response = await api<Array<{ commit: { message: string }; html_url: string; sha: string }>>(
         `repos/${repository}/commits?sha=${encodeURIComponent(head)}&per_page=100&page=${page}`,
       )
-      commits.push(...response.map((commit) => ({
-        bump: bumpForMessage(commit.commit.message),
-        message: commit.commit.message,
-        sha: commit.sha,
-        url: commit.html_url,
-      })))
+      commits.push(
+        ...response.map((commit) => ({
+          bump: bumpForMessage(commit.commit.message),
+          message: commit.commit.message,
+          sha: commit.sha,
+          url: commit.html_url,
+        })),
+      )
       if (response.length < 100) break
       if (page >= 100) throw new Error(`${repository} exceeds the supported 10,000-commit import history.`)
     }
@@ -489,7 +554,11 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   }
 
   async getBranchSha(repository: string, branch: string): Promise<string> {
-    const commit = await api<{ sha: string }>(`repos/${repository}/commits/${encodeURIComponent(branch)}`)
+    const commit = await api<{ sha: string }>(
+      `repos/${repository}/commits/${encodeURIComponent(branch)}`,
+      {},
+      repository === 'findmydoc-platform/ops' ? this.opsEnvironment() : process.env,
+    )
     return commit.sha
   }
 
@@ -520,7 +589,11 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     return comparison.commits
   }
 
-  async compareReleaseCommits(repository: string, base: string, head: string): Promise<{
+  async compareReleaseCommits(
+    repository: string,
+    base: string,
+    head: string,
+  ): Promise<{
     commits: ReleaseCommit[]
     mergeBaseSha: string
     status: 'ahead' | 'diverged' | 'identical'
@@ -535,7 +608,9 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
       throw new Error(`${repository} release tags have unsupported comparison status ${comparison.status}.`)
     }
     if (comparison.total_commits > comparison.commits.length) {
-      throw new Error(`${repository} has ${comparison.total_commits} commits in the release range, exceeding the GitHub comparison response.`)
+      throw new Error(
+        `${repository} has ${comparison.total_commits} commits in the release range, exceeding the GitHub comparison response.`,
+      )
     }
     return {
       commits: comparison.commits.map((commit) => ({
@@ -552,9 +627,10 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   async getPullRequests(repository: string, commits: ReleaseCommit[]): Promise<ReleasePullRequest[]> {
     return discoverReleasePullRequests({
       commits,
-      getAssociatedPullRequestNumbers: async (commit) => (await api<Array<{ number: number }>>(
-        `repos/${repository}/commits/${commit.sha}/pulls`,
-      )).map((pull) => pull.number),
+      getAssociatedPullRequestNumbers: async (commit) =>
+        (await api<Array<{ number: number }>>(`repos/${repository}/commits/${commit.sha}/pulls`)).map(
+          (pull) => pull.number,
+        ),
       getClosingIssues: async (number) => closingIssues(repository, number),
       getCommitEvidence: async (sha) => commitEvidence(repository, sha),
       getPullRequest: async (number) => optionalApi<GitHubPullRequest>(`repos/${repository}/pulls/${number}`),
@@ -565,6 +641,8 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   async isAncestor(repository: string, ancestor: string, branch: string): Promise<boolean> {
     const comparison = await api<{ status: string }>(
       `repos/${repository}/compare/${encodeURIComponent(ancestor)}...${encodeURIComponent(branch)}`,
+      {},
+      repository === 'findmydoc-platform/ops' ? this.opsEnvironment() : process.env,
     )
     return comparison.status === 'ahead' || comparison.status === 'identical'
   }
@@ -588,9 +666,9 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
     workflow: string
   }): Promise<WorkflowRun | undefined> {
     const basePath = `repos/${input.repository}/actions/workflows/${encodeURIComponent(input.workflow)}/runs?event=workflow_dispatch&branch=${encodeURIComponent(input.branch)}`
-    return findWorkflowRunInPages(input.title, async (page, perPage) => api<GitHubWorkflowRunsPage>(
-      `${basePath}&per_page=${perPage}&page=${page}`,
-    ))
+    return findWorkflowRunInPages(input.title, async (page, perPage) =>
+      api<GitHubWorkflowRunsPage>(`${basePath}&per_page=${perPage}&page=${page}`),
+    )
   }
 
   async getRelease(repository: string, version: string): Promise<PlatformReleaseDetails | undefined> {
@@ -636,8 +714,12 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   }): Promise<PlatformReleaseDetails> {
     const releasePath = `repos/${input.repository}/releases/${input.releaseId}`
     const current = await api<GitHubRelease>(releasePath)
-    if (current.draft !== true || current.name !== `findmydoc ${input.version}` ||
-      current.target_commitish !== input.targetSha || !isVersionReleaseCandidate(current, input.version)) {
+    if (
+      current.draft !== true ||
+      current.name !== `findmydoc ${input.version}` ||
+      current.target_commitish !== input.targetSha ||
+      !isVersionReleaseCandidate(current, input.version)
+    ) {
       throw new Error(`${input.repository} ${input.version} draft identity changed before publication.`)
     }
     if (current.tag_name !== input.version) {
@@ -645,8 +727,11 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
         body: { tag_name: input.version, target_commitish: input.targetSha },
         method: 'PATCH',
       })
-      if (retagged.draft !== true || retagged.tag_name !== input.version ||
-        retagged.target_commitish !== input.targetSha) {
+      if (
+        retagged.draft !== true ||
+        retagged.tag_name !== input.version ||
+        retagged.target_commitish !== input.targetSha
+      ) {
         throw new Error(`GitHub did not bind ${input.repository} draft to ${input.version}.`)
       }
     }
@@ -675,7 +760,9 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
   }): Promise<PlatformReleaseDetails> {
     const current = await api<GitHubRelease>(`repos/${input.repository}/releases/${input.releaseId}`)
     if (current.draft !== true) {
-      throw new Error(`${input.repository} ${input.version} is already published without stable platform publication metadata.`)
+      throw new Error(
+        `${input.repository} ${input.version} is already published without stable platform publication metadata.`,
+      )
     }
     const existing = platformPublishedAt(current.body)
     if (existing && existing !== input.platformPublishedAt) {
@@ -741,7 +828,6 @@ export class GhPlatformReleaseClient implements PlatformReleaseGitHubClient {
       await rm(directory, { force: true, recursive: true })
     }
   }
-
 }
 
 const ANNOUNCEMENT_ENVIRONMENT = 'platform-release-announcement'
@@ -773,9 +859,7 @@ export class GhPlatformReleaseAnnouncementStore implements PlatformReleaseAnnoun
   }
 
   private request<T>(path: string, options: GitHubApiOptions = {}): Promise<T> {
-    return this.requestOverride
-      ? this.requestOverride<T>(path, options)
-      : api<T>(path, options, this.environment())
+    return this.requestOverride ? this.requestOverride<T>(path, options) : api<T>(path, options, this.environment())
   }
 
   private async findDeployment(manifestDigest: string): Promise<GitHubDeployment | undefined> {
@@ -799,7 +883,7 @@ export class GhPlatformReleaseAnnouncementStore implements PlatformReleaseAnnoun
   async getState(manifestDigest: string): Promise<ReleaseAnnouncementState | undefined> {
     const deployment = await this.findDeployment(manifestDigest)
     if (!deployment) return undefined
-    return await this.latestState(deployment.id) === 'success' ? 'sent' : 'pending'
+    return (await this.latestState(deployment.id)) === 'success' ? 'sent' : 'pending'
   }
 
   async setState(input: {
@@ -825,7 +909,7 @@ export class GhPlatformReleaseAnnouncementStore implements PlatformReleaseAnnoun
       })
     }
     const expectedState = input.state === 'sent' ? 'success' : 'in_progress'
-    if (await this.latestState(deployment.id) === expectedState) return
+    if ((await this.latestState(deployment.id)) === expectedState) return
     await this.request(`repos/${this.repository}/deployments/${deployment.id}/statuses`, {
       body: {
         auto_inactive: false,

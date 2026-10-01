@@ -113,6 +113,17 @@ jobs:
             website
             clinic-dashboard
 
+      - name: Create Ops planning token
+        id: ops-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.PLATFORM_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}
+          owner: findmydoc-platform
+          permission-contents: read
+          repositories: |
+            ops
+
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -126,6 +137,7 @@ jobs:
 
       - name: Create plan
         env:
+          GITHUB_OPS_TOKEN: ${{ steps.ops-token.outputs.token }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           MANUAL_VERSION: ${{ inputs.manual_version }}
         run: |
@@ -206,6 +218,18 @@ jobs:
           repositories: |
             website
             clinic-dashboard
+
+      - name: Create Ops reconciliation token
+        id: ops-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.PLATFORM_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}
+          owner: findmydoc-platform
+          permission-actions: write
+          permission-contents: read
+          repositories: |
+            ops
 
       - name: Restore immutable Ops archive artifacts
         if: inputs.archive_ref != ''
@@ -293,6 +317,7 @@ jobs:
           CONFIRM_VERSION: ${{ inputs.confirm_version }}
           FOUNDEROPS_PLATFORM_RELEASE_TOKEN: ${{ secrets.FOUNDEROPS_PLATFORM_RELEASE_TOKEN }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_OPS_TOKEN: ${{ steps.ops-token.outputs.token }}
           GITHUB_STATE_TOKEN: ${{ github.token }}
           GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
           SEND_ANNOUNCEMENT: ${{ inputs.announce }}
@@ -322,6 +347,15 @@ jobs:
           path: artifacts/platform-release/platform-release.json
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Upload verified Ops reconciliation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: supabase-release-reconciliation
+          path: artifacts/platform-release/supabase-reconciliation.json
+          if-no-files-found: ignore
+          retention-days: 90
 
   recover:
     name: Recover frozen platform release handoff

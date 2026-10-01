@@ -1,5 +1,10 @@
 {
   "schemaVersion": 1,
+  "supabaseReconciliation": {
+    "repository": "findmydoc-platform/ops",
+    "branch": "main",
+    "workflow": "supabase-auth-config.yml"
+  },
   "platformBaselineVersion": "v0.45.0",
   "founderOps": {
     "baseUrl": "https://founder-ops.findmydoc.eu",

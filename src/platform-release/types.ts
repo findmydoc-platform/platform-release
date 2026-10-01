@@ -11,12 +11,14 @@ export type PlatformReleaseRepositoryConfig = {
 }
 
 export type PlatformReleaseConfig = {
+  supabaseReconciliation?: SupabaseReleaseConfig
   founderOps: {
     baseUrl: string
     ingestPath: string
   }
   platformBaselineVersion: string
-  repositories: Record<string, PlatformReleaseRepositoryConfig> & Record<PlatformRepositoryKey, PlatformReleaseRepositoryConfig>
+  repositories: Record<string, PlatformReleaseRepositoryConfig> &
+    Record<PlatformRepositoryKey, PlatformReleaseRepositoryConfig>
   schemaVersion: 1
 }
 
@@ -76,6 +78,7 @@ export type PlatformReleaseRepositoryPlan = {
 }
 
 export type PlatformReleasePlan = {
+  supabaseReconciliation?: SupabaseReleaseBinding
   breakingChanges: Array<{
     message: string
     repository: string
@@ -92,6 +95,11 @@ export type PlatformReleasePlan = {
 }
 
 export type WorkflowRun = {
+  event?: string
+  headBranch?: string
+  headSha?: string
+  path?: string
+  runAttempt?: number
   conclusion: string | null
   databaseId: number
   displayTitle: string
@@ -199,10 +207,12 @@ export type ReleaseContentV3 = {
 
 export type PlatformReleaseManifestV3 = {
   changes: ReleaseContentChangeV3[]
-  components: Array<Omit<PlatformReleaseManifestComponent, 'deploymentRun' | 'key'> & {
-    deploymentRun: string | null
-    key: string
-  }>
+  components: Array<
+    Omit<PlatformReleaseManifestComponent, 'deploymentRun' | 'key'> & {
+      deploymentRun: string | null
+      key: string
+    }
+  >
   contentDigest: string
   highlights: string[]
   manifestDigest: string
@@ -228,7 +238,11 @@ export type ImportedGitHubRelease = {
 }
 
 export type ReleaseImportGitHubClient = {
-  compareReleaseCommits(repository: string, base: string, head: string): Promise<{
+  compareReleaseCommits(
+    repository: string,
+    base: string,
+    head: string,
+  ): Promise<{
     commits: ReleaseCommit[]
     mergeBaseSha: string
     status: 'ahead' | 'diverged' | 'identical'
@@ -282,13 +296,19 @@ export type FounderOpsIngestResult = {
 }
 
 export type FounderOpsReleaseClient = {
-  ingestManifest(input: {
-    manifest: string
-    manifestDigest: string
-  }): Promise<FounderOpsIngestResult>
+  ingestManifest(input: { manifest: string; manifestDigest: string }): Promise<FounderOpsIngestResult>
 }
 
 export type PlatformReleaseGitHubClient = {
+  getRepositoryFile?(repository: string, path: string, sha: string): Promise<string | undefined>
+  dispatchWorkflowRun?(input: {
+    branch: string
+    inputs: Record<string, string>
+    repository: string
+    workflow: string
+  }): Promise<Pick<WorkflowRun, 'databaseId' | 'url'>>
+  getWorkflowRun?(repository: string, runId: number): Promise<WorkflowRun>
+  getWorkflowArtifact?(repository: string, run: WorkflowRun, name: string): Promise<WorkflowArtifactBundle>
   compareCommits(repository: string, base: string, head: string): Promise<ReleaseCommit[]>
   createDraftRelease(input: {
     body: string
@@ -314,21 +334,23 @@ export type PlatformReleaseGitHubClient = {
   getRelease(repository: string, version: string): Promise<PlatformReleaseDetails | undefined>
   getReleaseManifest(repository: string, version: string): Promise<string | undefined>
   isAncestor(repository: string, ancestor: string, branch: string): Promise<boolean>
-  publishRelease(input: { repository: string; releaseId: number; targetSha: string; version: string }): Promise<PlatformReleaseDetails>
+  publishRelease(input: {
+    repository: string
+    releaseId: number
+    targetSha: string
+    version: string
+  }): Promise<PlatformReleaseDetails>
   setReleasePlatformPublishedAt(input: {
     platformPublishedAt: string
     releaseId: number
     repository: string
     version: string
   }): Promise<PlatformReleaseDetails>
-  ensureReleaseManifest(input: {
-    manifest: string
-    repository: string
-    version: string
-  }): Promise<void>
+  ensureReleaseManifest(input: { manifest: string; repository: string; version: string }): Promise<void>
 }
 
 export type PlatformReleaseApplyResult = {
+  reconciliation?: SupabaseReleaseAttestation
   announcement: 'already_sent' | 'sent' | 'skipped'
   contentDigest: string
   digest: string
@@ -338,4 +360,53 @@ export type PlatformReleaseApplyResult = {
   status: 'published'
   version: string
   workflows: Record<PlatformRepositoryKey, WorkflowRun>
+}
+
+export type SupabaseReleaseConfig = { repository: string; branch: string; workflow: string }
+export type SupabaseReleaseTarget = {
+  instance: string
+  profile: string
+  projectRefDigest: string
+  managedFields: string[]
+}
+export type SupabaseReleaseBinding = SupabaseReleaseConfig & {
+  schemaVersion: 1
+  opsSha: string
+  workflowDigest: string
+  targets: Record<'preview' | 'production', SupabaseReleaseTarget>
+}
+export type SupabaseReleaseContext = {
+  schemaVersion: 1
+  environment: 'preview' | 'production'
+  version: string
+  planDigest: string
+  contentDigest: string
+  opsSha: string
+}
+export type WorkflowArtifactBundle = { id: number; name: string; digest: string; files: Record<string, string> }
+export type SupabaseReleaseRunStore = {
+  getRun(context: SupabaseReleaseContext): Promise<number | null | undefined>
+  begin(context: SupabaseReleaseContext): Promise<void>
+  recordRun(context: SupabaseReleaseContext, runId: number): Promise<void>
+}
+export type SupabaseReleaseAttestation = {
+  schemaVersion: 1
+  opsSha: string
+  planDigest: string
+  contentDigest: string
+  version: string
+  environments: Record<
+    'preview' | 'production',
+    {
+      artifactId: number
+      artifactDigest: string
+      artifactName: string
+      runId: number
+      runAttempt: number
+      runUrl: string
+      resultDigest: string
+      managedFields: string[]
+      status: 'verified'
+    }
+  >
 }
