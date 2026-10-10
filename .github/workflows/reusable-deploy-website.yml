@@ -157,9 +157,17 @@ jobs:
             exit "$status"
           }
           interrupt_build() {
+            local attempt
             trap '' INT TERM HUP
             if [[ -n "$build_pid" ]]; then
               kill -TERM -- "-$build_pid" 2>/dev/null || true
+              for ((attempt = 0; attempt < 5; attempt++)); do
+                if ! kill -0 -- "-$build_pid" 2>/dev/null; then
+                  break
+                fi
+                sleep 1
+              done
+              kill -KILL -- "-$build_pid" 2>/dev/null || true
               wait "$build_pid" 2>/dev/null || true
             fi
             exit "$1"

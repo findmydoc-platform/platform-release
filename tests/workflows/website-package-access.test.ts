@@ -4,6 +4,8 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  existsSync,
+  readlinkSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -73,6 +75,8 @@ const runStep = (
     buildExitCode?: number
     buildSignal?: string
     rootEnvFiles?: boolean
+    resistantDescendant?: boolean
+    moveFailure?: boolean
   } = {},
 ) => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'website-package-access-'))
@@ -125,8 +129,28 @@ if (args.includes("build")) {
     rawCaAbsent: !process.env.DATABASE_CA_CERT,
   }));
   if (process.env.STUB_BUILD_SIGNAL) {
+    if (process.env.STUB_RESISTANT_DESCENDANT === "true") {
+      const child = require("node:child_process").spawn(process.execPath, ["-e", \`
+        const fs = require("node:fs");
+        process.on("SIGTERM", () => {});
+        fs.writeFileSync(process.env.DESCENDANT_READY, String(process.pid));
+        setInterval(() => {}, 1000);
+      \`], { stdio: "ignore" });
+      const deadline = Date.now() + 2000;
+      while (!fs.existsSync(process.env.DESCENDANT_READY)) {
+        if (Date.now() > deadline) throw new Error("Build descendant did not start");
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    }
+    process.on("SIGTERM", () => {
+      fs.writeFileSync(process.env.BUILD_TERMINATED_LOG, "terminated");
+      process.exit(143);
+    });
     process.kill(process.ppid, process.env.STUB_BUILD_SIGNAL);
-    setTimeout(() => process.exit(99), 2000);
+    setTimeout(() => {
+      fs.writeFileSync(process.env.BUILD_TERMINATED_LOG, "timeout");
+      process.exit(99);
+    }, 2000);
     return;
   }
   process.exit(Number(process.env.STUB_BUILD_EXIT_CODE));
@@ -157,6 +181,16 @@ fi
   writeFileSync(path.join(bin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n', {
     mode: 0o700,
   })
+  writeFileSync(
+    path.join(bin, 'mv'),
+    `#!/usr/bin/env bash
+if [[ "\${STUB_MOVE_FAILURE:-}" == "true" && "\${2:-}" == ".env.example" ]]; then
+  exit 51
+fi
+exec /bin/mv "$@"
+`,
+    { mode: 0o700 },
+  )
   const declaredEnvironment = {
     ...workflow.env,
     ...workflow.jobs.deploy.env,
@@ -197,6 +231,10 @@ fi
       STUB_CA_CERT: databaseCaCert,
       STUB_BUILD_EXIT_CODE: String(options.buildExitCode ?? 0),
       STUB_BUILD_SIGNAL: options.buildSignal ?? '',
+      STUB_RESISTANT_DESCENDANT: String(options.resistantDescendant ?? false),
+      BUILD_TERMINATED_LOG: path.join(directory, 'build-terminated.log'),
+      DESCENDANT_READY: path.join(directory, 'descendant-ready.log'),
+      STUB_MOVE_FAILURE: String(options.moveFailure ?? false),
       TMPDIR: directory,
       RUNNER_TEMP: directory,
     },
@@ -221,7 +259,17 @@ fi
 }
 
 afterEach(() => {
-  for (const directory of temporaryDirectories) rmSync(directory, { recursive: true, force: true })
+  for (const directory of temporaryDirectories) {
+    const descendantReady = path.join(directory, 'descendant-ready.log')
+    if (existsSync(descendantReady)) {
+      try {
+        process.kill(Number(readFileSync(descendantReady, 'utf8')), 'SIGKILL')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+      }
+    }
+    rmSync(directory, { recursive: true, force: true })
+  }
   temporaryDirectories.clear()
 })
 
@@ -232,6 +280,7 @@ describe('Website package-read credential boundary', () => {
     { name: 'SIGINT', buildSignal: 'SIGINT', expectedStatus: 130 },
     { name: 'SIGTERM', buildSignal: 'SIGTERM', expectedStatus: 143 },
     { name: 'SIGHUP', buildSignal: 'SIGHUP', expectedStatus: 129 },
+    { name: 'TERM-resistant descendant', buildSignal: 'SIGTERM', resistantDescendant: true, expectedStatus: 143 },
   ])('isolates root env files and restores them after $name', (options) => {
     const build = runStep(namedStep('Build Vercel production'), options)
     expect(build.result.status, build.result.stderr).toBe(options.expectedStatus)
@@ -247,8 +296,31 @@ describe('Website package-read credential boundary', () => {
       expect(statSync(path.join(build.directory, name)).mode & 0o777).toBe(0o600)
     }
     expect(readFileSync(path.join(build.directory, '.env.link'), 'utf8')).toBe(build.rootEnvContents['.env.test'])
+    expect(readlinkSync(path.join(build.directory, '.env.link'))).toBe('.env.test')
     expect(readFileSync(path.join(build.directory, '.vercel/.env.production.local'), 'utf8')).toBe(build.pulledContents)
     expect(build.caFilesRemaining).toEqual([])
+    if (options.buildSignal) {
+      expect(readFileSync(path.join(build.directory, 'build-terminated.log'), 'utf8')).toBe('terminated')
+    }
+    const descendantReady = path.join(build.directory, 'descendant-ready.log')
+    if (existsSync(descendantReady)) {
+      const descendantPid = Number(readFileSync(descendantReady, 'utf8'))
+      let stopped = false
+      const deadline = Date.now() + 2000
+      while (!stopped && Date.now() < deadline) {
+        try {
+          process.kill(descendantPid, 0)
+          // A reparented zombie has stopped executing but may await reaping on Linux.
+          if (os.platform() === 'linux')
+            stopped = readFileSync(`/proc/${descendantPid}/stat`, 'utf8').split(')')[1]!.trim().startsWith('Z')
+        } catch (error) {
+          if (['ESRCH', 'ENOENT'].includes((error as NodeJS.ErrnoException).code ?? '')) stopped = true
+          else throw error
+        }
+        if (!stopped) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+      }
+      expect(stopped, 'Build descendant must stop before root env restoration').toBe(true)
+    }
     expect(readdirSync(build.directory).filter((name) => name.startsWith('production-root-env.'))).toEqual([])
     expect(build.invocations.map((invocation) => invocation.args)).toEqual([
       ['dlx', 'vercel@canary', 'build', '--prod', '--yes'],
@@ -260,6 +332,17 @@ describe('Website package-read credential boundary', () => {
     expect(build.result.status, build.result.stderr).toBe(0)
     expect(JSON.parse(readFileSync(build.buildEnvironmentLog, 'utf8')).rootFiles).toEqual([])
     expect(build.caFilesRemaining).toEqual([])
+  })
+
+  it('restores already moved files and blocks Vercel if root env isolation fails', () => {
+    const build = runStep(namedStep('Build Vercel production'), { moveFailure: true })
+    expect(build.result.status, build.result.stderr).toBe(51)
+    expect(build.invocations).toEqual([])
+    for (const [name, contents] of Object.entries(build.rootEnvContents))
+      expect(readFileSync(path.join(build.directory, name), 'utf8')).toBe(contents)
+    expect(readlinkSync(path.join(build.directory, '.env.link'))).toBe('.env.test')
+    expect(build.caFilesRemaining).toEqual([])
+    expect(readdirSync(build.directory).filter((name) => name.startsWith('production-root-env.'))).toEqual([])
   })
 
   it('never restores or saves the private package through Actions caches', () => {
