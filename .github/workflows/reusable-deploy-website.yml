@@ -136,7 +136,38 @@ jobs:
             exit 1
           fi
           ca_file="$(mktemp "$RUNNER_TEMP/production-db-ca.XXXXXX")"
-          trap 'rm -f "$ca_file"' EXIT
+          root_env_backup=""
+          build_pid=""
+          cleanup_build() {
+            local status=$? cleanup_status=0 environment_file
+            trap - EXIT
+            trap '' INT TERM HUP
+            if [[ -n "$root_env_backup" ]]; then
+              for environment_file in "$root_env_backup/.env" "$root_env_backup"/.env.*; do
+                if [[ -f "$environment_file" || -L "$environment_file" ]]; then
+                  mv -- "$environment_file" . || cleanup_status=1
+                fi
+              done
+              rmdir -- "$root_env_backup" || cleanup_status=1
+            fi
+            rm -f -- "$ca_file" || cleanup_status=1
+            if [[ "$status" -eq 0 ]]; then
+              status=$cleanup_status
+            fi
+            exit "$status"
+          }
+          interrupt_build() {
+            trap '' INT TERM HUP
+            if [[ -n "$build_pid" ]]; then
+              kill -TERM -- "-$build_pid" 2>/dev/null || true
+              wait "$build_pid" 2>/dev/null || true
+            fi
+            exit "$1"
+          }
+          trap cleanup_build EXIT
+          trap 'interrupt_build 130' INT
+          trap 'interrupt_build 143' TERM
+          trap 'interrupt_build 129' HUP
           printf '%s\n' "$DATABASE_CA_CERT" > "$ca_file"
           unset DATABASE_CA_CERT
           if [[ "$(openssl x509 -in "$ca_file" -noout -fingerprint -sha256)" != "sha256 Fingerprint=80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA" ]]; then
@@ -145,7 +176,21 @@ jobs:
           fi
           export NODE_EXTRA_CA_CERTS="$ca_file"
           bash ./.github/scripts/deploy/assert-vercel-project-binding.sh
-          pnpm dlx vercel@canary build --prod --yes
+
+          # Vercel packages root env files independently of Next.js tracing exclusions.
+          # Build values remain available through the runner and .vercel environment.
+          root_env_backup="$(mktemp -d "$RUNNER_TEMP/production-root-env.XXXXXX")"
+          for environment_file in .env .env.*; do
+            if [[ -f "$environment_file" || -L "$environment_file" ]]; then
+              mv -- "$environment_file" "$root_env_backup/"
+            fi
+          done
+
+          # Give the build its own process group so interruption stops its descendants.
+          set -m
+          pnpm dlx vercel@canary build --prod --yes &
+          build_pid=$!
+          wait "$build_pid"
 
       - name: Deploy Vercel production
         id: vercel-production
