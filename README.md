@@ -11,6 +11,12 @@ then Production, before deploying applications. The Runner verifies each exact w
 and reuses those runs on resume. See [the reconciliation contract](docs/supabase-reconciliation.md) for approval,
 evidence, recovery, and GitHub App installation prerequisites.
 
+## GitHub release notes
+
+New platform content templates include `githubSummaries` with `dashboard` and `website` introductions. Write two or three short English technical sentences per component, each on one line of at most 600 characters. The renderer builds native-style `What's Changed` lists from the frozen repository PRs and uncovered commits, plus a `Full Changelog` comparison link. It makes no additional GitHub requests to generate these notes.
+
+`content --json` returns both rendered notes in `githubReleaseNotes` for the same approval view. Both introductions are covered by the existing content digest. The German product summary and changes remain the FounderOps narrative; GitHub introductions are not copied into the manifest. Content without `githubSummaries` retains its original GitHub rendering and digest for historical retries and recovery. Release import content is unchanged.
+
 ## Website package access
 
 The Website reusable deployment workflow requires the caller secret `GH_PACKAGES_READ_TOKEN` with private package read access.

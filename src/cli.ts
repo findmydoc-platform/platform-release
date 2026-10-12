@@ -15,6 +15,7 @@ import {
   readReleaseContent,
   releaseContentTemplate,
   renderReleaseContentPreview,
+  renderRepositoryReleaseNotes,
 } from './platform-release/content.js'
 import { DEFAULT_PLATFORM_RELEASE_CONFIG_PATH, loadPlatformReleaseConfig } from './platform-release/config.js'
 import { HttpFounderOpsReleaseClient } from './platform-release/founder-ops.js'
@@ -272,7 +273,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
 
   program
     .command('content')
-    .description('Validate structured release content and render its German reading view')
+    .description('Validate content and render its German reading view and optional English GitHub notes')
     .requiredOption('--plan <path>', 'immutable JSON plan')
     .requiredOption('--content <path>', 'approved structured release content JSON')
     .option('--json', 'emit JSON output')
@@ -280,9 +281,16 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
       try {
         const plan = await readPlatformReleasePlan(options.plan)
         const content = await readReleaseContent(options.content, plan)
+        const githubReleaseNotes = content.githubSummaries
+          ? {
+              dashboard: renderRepositoryReleaseNotes(plan, content, 'dashboard'),
+              website: renderRepositoryReleaseNotes(plan, content, 'website'),
+            }
+          : undefined
         const result = {
           content,
           contentDigest: computeReleaseContentDigest(content),
+          ...(githubReleaseNotes ? { githubReleaseNotes } : {}),
           planDigest: plan.digest,
           preview: renderReleaseContentPreview(content),
           version: plan.version,
@@ -290,7 +298,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
         if (options.json) writeJson(result, runtime.writeStdout)
         else
           runtime.writeStdout(
-            `${result.preview}\n\nVersion: ${result.version}\nPlan digest: ${result.planDigest}\nContent digest: ${result.contentDigest}\n`,
+            `${result.preview}${githubReleaseNotes ? `\n\n## GitHub: Website\n\n${githubReleaseNotes.website}\n\n## GitHub: Clinic Dashboard\n\n${githubReleaseNotes.dashboard}` : ''}\n\nVersion: ${result.version}\nPlan digest: ${result.planDigest}\nContent digest: ${result.contentDigest}\n`,
           )
       } catch (error) {
         writeError(error, options.json, runtime)

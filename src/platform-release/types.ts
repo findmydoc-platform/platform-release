@@ -152,6 +152,7 @@ export type ReleaseContentChange = {
 
 export type PlatformReleaseContent = {
   changes: ReleaseContentChange[]
+  githubSummaries?: Record<PlatformRepositoryKey, string>
   highlights: string[]
   schemaVersion: 1
   summary: string
