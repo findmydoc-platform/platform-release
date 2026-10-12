@@ -84,4 +84,81 @@ describe('structured release content', () => {
     expect(notes).toContain('## Technische Referenzen')
     expect(notes).not.toContain('## Platform release')
   })
+
+  it('validates and digest-binds both English introductions without changing the product narrative', () => {
+    const approved = {
+      ...content(),
+      githubSummaries: {
+        dashboard: 'This release adds review moderation to Clinic Dashboard.',
+        website: 'This release adds patient reviews to the website.',
+      },
+    }
+    expect(validateReleaseContent(plan, approved)).toEqual(approved)
+    expect(releaseContentTemplate(plan).githubSummaries).toEqual({ dashboard: '', website: '' })
+    expect(computeReleaseContentDigest(approved)).not.toBe(
+      computeReleaseContentDigest({
+        ...approved,
+        githubSummaries: { ...approved.githubSummaries, website: 'This release fixes review rendering.' },
+      }),
+    )
+    expect(() => validateReleaseContent(plan, { ...approved, githubSummaries: { website: 'Only one repo.' } })).toThrow(
+      'exactly',
+    )
+    expect(() =>
+      validateReleaseContent(plan, { ...approved, githubSummaries: { ...approved.githubSummaries, website: '' } }),
+    ).toThrow('Website GitHub summary')
+    expect(validateReleaseContent(plan, content())).not.toHaveProperty('githubSummaries')
+    expect(approved.summary).toBe(content().summary)
+  })
+
+  it('renders native-style English notes scoped to the repo, including only uncovered commits', () => {
+    const nativePlan = structuredClone(plan)
+    const covered = 'b'.repeat(40)
+    const orphan = 'c'.repeat(40)
+    nativePlan.repositories.website = {
+      ...nativePlan.repositories.website,
+      repository: 'org/website',
+      base: { kind: 'release', version: 'v0.45.0', sha: 'a'.repeat(40) },
+      commits: [
+        {
+          sha: covered,
+          bump: 'minor',
+          message: 'feat: reviews',
+          url: `https://github.com/org/website/commit/${covered}`,
+        },
+        {
+          sha: orphan,
+          bump: 'patch',
+          message: 'fix: review cache\nAdditional commit detail',
+          url: `https://github.com/org/website/commit/${orphan}`,
+        },
+      ],
+      pullRequests: [
+        { ...nativePlan.repositories.website.pullRequests[0]!, title: 'feat: patient reviews', commitShas: [covered] },
+      ],
+    }
+    const approved = {
+      ...content(),
+      githubSummaries: {
+        dashboard: 'This release adds moderation.',
+        website: 'This release adds patient reviews and fixes stale review caches.',
+      },
+    }
+    const notes = renderRepositoryReleaseNotes(nativePlan, approved, 'website')
+    expect(notes).toBe(
+      `This release adds patient reviews and fixes stale review caches.\n\n## What's Changed\n\n* feat: patient reviews in [#1](https://github.com/org/website/pull/1)\n* fix: review cache in [ccccccc](https://github.com/org/website/commit/${orphan})\n\n**Full Changelog:** https://github.com/org/website/compare/v0.45.0...v0.46.0\n\nPlatform-Plan: \`${plan.digest}\``,
+    )
+    expect(notes).not.toContain(covered)
+    expect(notes).not.toContain('org/dashboard')
+    expect(notes).not.toContain(approved.summary)
+    nativePlan.repositories.website = {
+      ...nativePlan.repositories.website,
+      base: { kind: 'cutover', sha: 'd'.repeat(40) },
+      commits: [],
+      pullRequests: [],
+    }
+    const unchanged = renderRepositoryReleaseNotes(nativePlan, approved, 'website')
+    expect(unchanged).toContain('No component-specific source changes')
+    expect(unchanged).toContain(`/compare/${'d'.repeat(40)}...v0.46.0`)
+  })
 })

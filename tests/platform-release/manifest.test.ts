@@ -43,7 +43,7 @@ const plan = {
 describe('platform release manifest v2', () => {
   it('contains complete provenance with a self-verifying digest', () => {
     const manifest = createPlatformReleaseManifest({
-      config, content, contentDigest: 'b'.repeat(64), plan,
+      config, content: { ...content, githubSummaries: { dashboard: 'No dashboard source changes.', website: 'This release adds patient reviews.' } }, contentDigest: 'b'.repeat(64), plan,
       releases: {
         dashboard: { body: '', draft: true, id: 1, immutable: false, manifestAttached: false,
           platformPublishedAt: '2026-08-12T12:00:00.000Z', preparedAt: '2026-08-12T11:00:00Z',
@@ -58,6 +58,9 @@ describe('platform release manifest v2', () => {
       },
     })
     expect(manifest).toMatchObject({ publishedAt: '2026-08-12T12:00:00.000Z', schemaVersion: 2, version: 'v0.46.0' })
+    expect(manifest.summary).toBe(content.summary)
+    expect(manifest.changes).toEqual(content.changes)
+    expect(manifest).not.toHaveProperty('githubSummaries')
     expect(manifest.components[1]?.pullRequests[0]).toMatchObject({ commitShas: [websiteSha], number: 1 })
     expect(manifest.components[1]?.pullRequests[0]).not.toHaveProperty('body')
     expect(serializePlatformReleaseManifest(manifest)).toContain(`"manifestDigest": "${manifest.manifestDigest}"`)
@@ -68,7 +71,7 @@ describe('platform release manifest v2', () => {
 describe('release manifest v3', () => {
   it('keeps a native joint release distinct from silent application imports', () => {
     const manifest = createPlatformReleaseManifestV3({
-      config, content, contentDigest: 'b'.repeat(64), plan,
+      config, content: { ...content, githubSummaries: { dashboard: 'No dashboard source changes.', website: 'This release adds patient reviews.' } }, contentDigest: 'b'.repeat(64), plan,
       releases: {
         dashboard: { body: '', draft: true, id: 1, immutable: false, manifestAttached: false,
           platformPublishedAt: '2026-08-12T12:00:00.000Z', preparedAt: '2026-08-12T11:00:00Z',
@@ -83,6 +86,9 @@ describe('release manifest v3', () => {
       },
     })
     expect(manifest).toMatchObject({ notificationMode: 'standard', releaseMode: 'platform', schemaVersion: 3, source: { kind: 'native' } })
+    expect(manifest.summary).toBe(content.summary)
+    expect(manifest.changes[0]?.summary).toBe(content.changes[0]?.summary)
+    expect(manifest).not.toHaveProperty('githubSummaries')
     expect(manifest.changes[0]).toMatchObject({ commitShas: [], componentKeys: ['website'] })
     expect(validateReleaseManifest(JSON.parse(serializeReleaseManifest(manifest)))).toEqual(manifest)
   })

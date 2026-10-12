@@ -42,14 +42,25 @@ function pullRequestKey(repository: string, number: number): string {
   return `${repository}#${number}`
 }
 
+function readGithubSummaries(candidate: unknown): Record<PlatformRepositoryKey, string> {
+  const value = requireObject(candidate, 'GitHub summaries')
+  requireExactKeys(value, REPOSITORY_KEYS, 'GitHub summaries')
+  return {
+    dashboard: requireEditorialText(value.dashboard, 'Dashboard GitHub summary', 600),
+    website: requireEditorialText(value.website, 'Website GitHub summary', 600),
+  }
+}
+
 export function validateReleaseContent(
   plan: PlatformReleasePlan,
   candidate: unknown,
 ): PlatformReleaseContent {
   const value = requireObject(candidate, 'Release content')
-  requireExactKeys(value, ['changes', 'highlights', 'schemaVersion', 'summary'], 'Release content')
+  const hasGithubSummaries = Object.hasOwn(value, 'githubSummaries')
+  requireExactKeys(value, ['changes', 'highlights', 'schemaVersion', 'summary', ...(hasGithubSummaries ? ['githubSummaries'] : [])], 'Release content')
   if (value.schemaVersion !== 1) throw new Error('Unsupported release content schema.')
   const summary = requireEditorialText(value.summary, 'Release summary', 280)
+  const githubSummaries = hasGithubSummaries ? readGithubSummaries(value.githubSummaries) : undefined
   if (!Array.isArray(value.changes) || value.changes.length === 0) {
     throw new Error('Release content must contain at least one change.')
   }
@@ -138,7 +149,7 @@ export function validateReleaseContent(
     highlightSet.add(highlight)
     return highlight
   })
-  return { changes, highlights, schemaVersion: 1, summary }
+  return { changes, ...(githubSummaries ? { githubSummaries } : {}), highlights, schemaVersion: 1, summary }
 }
 
 export function computeReleaseContentDigest(content: PlatformReleaseContent): string {
@@ -167,6 +178,7 @@ export function releaseContentTemplate(plan: PlatformReleasePlan): PlatformRelea
   })))
   return {
     changes,
+    githubSummaries: { dashboard: '', website: '' },
     highlights: changes.slice(0, 6).map((change) => change.id),
     schemaVersion: 1,
     summary: '',
@@ -215,6 +227,32 @@ export function renderRepositoryReleaseNotes(
   key: PlatformRepositoryKey,
 ): string {
   const repository = plan.repositories[key]
+  if (content.githubSummaries) {
+    const coveredCommits = new Set(repository.pullRequests.flatMap((pullRequest) => pullRequest.commitShas))
+    const entries = [
+      ...repository.pullRequests.map(
+        (pullRequest) => `* ${pullRequest.title} in [#${pullRequest.number}](${pullRequest.url})`,
+      ),
+      ...repository.commits
+        .filter((commit) => !coveredCommits.has(commit.sha))
+        .map(
+          (commit) => `* ${commit.message.split(/\r?\n/, 1)[0] ?? ''} in [${commit.sha.slice(0, 7)}](${commit.url})`,
+        ),
+    ]
+    const base = encodeURIComponent(repository.base.version ?? repository.base.sha)
+    const comparison = `https://github.com/${repository.repository}/compare/${base}...${encodeURIComponent(plan.version)}`
+    return [
+      content.githubSummaries[key],
+      '',
+      "## What's Changed",
+      '',
+      ...(entries.length ? entries : ['No component-specific source changes in this platform release.']),
+      '',
+      `**Full Changelog:** ${comparison}`,
+      '',
+      `Platform-Plan: \`${plan.digest}\``,
+    ].join('\n')
+  }
   const repositoryPullRequests = new Set(repository.pullRequests.map((pullRequest) => pullRequestKey(pullRequest.repository, pullRequest.number)))
   const changes = content.changes.filter((change) => change.section === 'platform' || change.pullRequests.some((pullRequest) =>
     repositoryPullRequests.has(pullRequestKey(pullRequest.repository, pullRequest.number))))
