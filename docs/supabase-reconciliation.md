@@ -10,9 +10,9 @@ confirmations remain in Ops.
 `plan` freezes the trusted Ops `main` commit, workflow digest, instance/profile identities, project-reference digests,
 and complete managed field names in `supabaseReconciliation`. This scope contributes to the plan digest. The supported
 Ops v1 inventory opts staging and production into Auth routing and native mail suppression. The current shared
-Auth control profile has no native mail-template fields because transactional mail owns those messages. Plans
-using that profile freeze only the Auth hook and routing fields. The exact former four-field mail profile remains supported for
-pre-cutover inventory and approved historical plans; its field requirements do not apply to an empty profile.
+Auth control profile has no native mail-template fields because transactional mail owns those messages. New plans
+require an empty profile field list and freeze only the Auth hook and routing fields. Profiles that still declare
+native mail fields block new planning. Already frozen historical plans retain their original eight-field scope.
 Unknown managed fields or instance options block planning until the Runner supports them.
 
 The exact existing version, plan digest, and approved content digest authorize both environment reconciliations.
@@ -56,9 +56,10 @@ desired and remote fingerprints:
 - `hook_send_email_enabled` and `hook_send_email_uri`
 - `site_url` and `uri_allow_list`
 
-Only a frozen pre-cutover mail profile additionally requires `mailer_subjects_invite`, `mailer_subjects_recovery`,
-`mailer_templates_invite_content`, and `mailer_templates_recovery_content`. Empty profiles do not require these
-fields in either planning or execution evidence. Partial or unknown mail-field scopes still fail closed.
+Only an already frozen historical plan additionally requires `mailer_subjects_invite`, `mailer_subjects_recovery`,
+`mailer_templates_invite_content`, and `mailer_templates_recovery_content`. New plans never include these fields
+in planning or execution evidence. Nonempty profile scopes, including the complete legacy mail profile, block
+new planning. Historical evidence must match the original frozen scope exactly.
 
 Ops verifies suppression SQL and grants before changing the hook, then reads back the managed Auth configuration.
 A green workflow, dry-run, drift report, incomplete artifact, or mismatched context never qualifies. The Runner stops

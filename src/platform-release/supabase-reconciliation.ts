@@ -118,7 +118,7 @@ async function readSupabaseBinding(
       profile.version !== 1 ||
       profile.id !== instance.profileId ||
       !Array.isArray(profile.managedFields) ||
-      (!same(profile.managedFields, []) && !same([...profile.managedFields].sort(), LEGACY_MAIL_FIELDS))
+      !same(profile.managedFields, [])
     ) {
       throw new Error('Ops release profile does not match the supported managed scope.')
     }
@@ -126,7 +126,7 @@ async function readSupabaseBinding(
       instance: instanceId,
       profile: instance.profileId,
       projectRefDigest: sha256(instance.projectRef),
-      managedFields: [...SUPABASE_MANAGED_FIELDS, ...profile.managedFields].sort(),
+      managedFields: [...SUPABASE_MANAGED_FIELDS],
     }
   }
   const binding = { ...config, schemaVersion: 1 as const, opsSha, workflowDigest: sha256(workflow), targets }
