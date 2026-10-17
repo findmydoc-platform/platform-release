@@ -11,16 +11,15 @@ import type {
   WorkflowRun,
 } from './types.js'
 
-export const SUPABASE_MANAGED_FIELDS = [
-  'hook_send_email_enabled',
-  'hook_send_email_uri',
+export const SUPABASE_MANAGED_FIELDS = ['hook_send_email_enabled', 'hook_send_email_uri', 'site_url', 'uri_allow_list']
+// Preserve the exact scope of approved plans from before the transactional-mail cutover.
+const LEGACY_MAIL_FIELDS = [
   'mailer_subjects_invite',
   'mailer_subjects_recovery',
   'mailer_templates_invite_content',
   'mailer_templates_recovery_content',
-  'site_url',
-  'uri_allow_list',
 ]
+const LEGACY_MANAGED_FIELDS = [...SUPABASE_MANAGED_FIELDS, ...LEGACY_MAIL_FIELDS].sort()
 const HEX_SHA = /^[a-f0-9]{40}$/
 const HEX_DIGEST = /^[a-f0-9]{64}$/
 const ID = /^[a-z][a-z0-9-]{0,63}$/
@@ -57,7 +56,7 @@ export function validateSupabaseReleaseBinding(binding: SupabaseReleaseBinding):
       target.instance !== (environment === 'preview' ? 'staging' : 'production') ||
       !ID.test(target.profile) ||
       !HEX_DIGEST.test(target.projectRefDigest) ||
-      !same(target.managedFields, SUPABASE_MANAGED_FIELDS)
+      (!same(target.managedFields, SUPABASE_MANAGED_FIELDS) && !same(target.managedFields, LEGACY_MANAGED_FIELDS))
     )
       throw new Error('Frozen Ops target scope is invalid.')
   }
@@ -119,10 +118,7 @@ async function readSupabaseBinding(
       profile.version !== 1 ||
       profile.id !== instance.profileId ||
       !Array.isArray(profile.managedFields) ||
-      !same(
-        [...profile.managedFields].sort(),
-        SUPABASE_MANAGED_FIELDS.filter((field) => field.startsWith('mailer_')),
-      )
+      (!same(profile.managedFields, []) && !same([...profile.managedFields].sort(), LEGACY_MAIL_FIELDS))
     ) {
       throw new Error('Ops release profile does not match the supported managed scope.')
     }
@@ -130,7 +126,7 @@ async function readSupabaseBinding(
       instance: instanceId,
       profile: instance.profileId,
       projectRefDigest: sha256(instance.projectRef),
-      managedFields: [...SUPABASE_MANAGED_FIELDS],
+      managedFields: [...SUPABASE_MANAGED_FIELDS, ...profile.managedFields].sort(),
     }
   }
   const binding = { ...config, schemaVersion: 1 as const, opsSha, workflowDigest: sha256(workflow), targets }

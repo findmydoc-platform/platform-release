@@ -3,6 +3,7 @@ import {
   bindSupabaseRelease,
   reconcileSupabaseRelease,
   supabaseReleaseContext,
+  validateSupabaseOutcome,
 } from '../../src/platform-release/supabase-reconciliation.js'
 import { opsFixture, rehash } from './supabase-fixture.js'
 import { canonicalJson, sha256 } from '../../src/platform-release/canonical.js'
@@ -394,46 +395,89 @@ describe('Ops-owned Supabase release reconciliation', () => {
     expect(fixture.events).toEqual(['verified:preview', 'verified:production'])
     expect(JSON.stringify(result)).not.toContain('projectRef')
   })
-  it('binds the complete opted-in inventory to one frozen trusted Ops commit without raw configuration', async () => {
-    const reads: string[] = []
-    const github = {
-      async getBranchSha() {
-        return opsSha
-      },
-      async getRepositoryFile(_repository: string, path: string, sha: string) {
-        expect(sha).toBe(opsSha)
-        reads.push(path)
-        if (path.startsWith('.github/')) return 'name: Supabase Auth Config\n'
-        if (path.includes('/profiles/'))
-          return JSON.stringify({ version: 1, id: 'shared-auth-mail', managedFields: mailFields })
-        const production = path.endsWith('production.json')
-        return JSON.stringify({
-          version: 1,
-          id: production ? 'production' : 'staging',
-          profileId: 'shared-auth-mail',
-          projectRef: (production ? 'p' : 's').repeat(20),
-          credentialId: 'findmydoc',
-          applyProtection: production ? 'protected' : 'standard',
-          authRouting: {},
-          nativeMailSuppression: true,
-        })
-      },
-    } as unknown as PlatformReleaseGitHubClient
-    const binding = await bindSupabaseRelease(config, github)
-    expect(binding.opsSha).toBe(opsSha)
-    expect(binding.targets.preview.instance).toBe('staging')
-    expect(binding.targets.production.managedFields).toEqual([
-      'hook_send_email_enabled',
-      'hook_send_email_uri',
-      'mailer_subjects_invite',
-      'mailer_subjects_recovery',
-      'mailer_templates_invite_content',
-      'mailer_templates_recovery_content',
-      'site_url',
-      'uri_allow_list',
-    ])
-    expect(reads).toHaveLength(5)
-    expect(JSON.stringify(binding)).not.toContain('credentialId')
-    expect(JSON.stringify(binding)).not.toContain('p'.repeat(20))
-  })
+  it.each([
+    {
+      profileId: 'shared-auth-control',
+      profileFields: [],
+      expectedFields: ['hook_send_email_enabled', 'hook_send_email_uri', 'site_url', 'uri_allow_list'],
+    },
+    { profileId: 'shared-auth-mail', profileFields: mailFields, expectedFields: managedFields },
+  ])(
+    'binds and verifies the configured mail ownership with profile fields $profileFields',
+    async ({ profileId, profileFields, expectedFields }) => {
+      const reads: string[] = []
+      const github = {
+        async getBranchSha() {
+          return opsSha
+        },
+        async getRepositoryFile(_repository: string, path: string, sha: string) {
+          expect(sha).toBe(opsSha)
+          reads.push(path)
+          if (path.startsWith('.github/')) return 'name: Supabase Auth Config\n'
+          if (path.includes('/profiles/'))
+            return JSON.stringify({ version: 1, id: profileId, managedFields: profileFields })
+          const production = path.endsWith('production.json')
+          return JSON.stringify({
+            version: 1,
+            id: production ? 'production' : 'staging',
+            profileId,
+            projectRef: (production ? 'p' : 's').repeat(20),
+            credentialId: 'findmydoc',
+            applyProtection: production ? 'protected' : 'standard',
+            authRouting: {},
+            nativeMailSuppression: true,
+          })
+        },
+      } as unknown as PlatformReleaseGitHubClient
+      const binding = await bindSupabaseRelease(config, github)
+      expect(binding.opsSha).toBe(opsSha)
+      expect(binding.targets.preview.instance).toBe('staging')
+      expect(binding.targets.preview.managedFields).toEqual(expectedFields)
+      expect(binding.targets.production.managedFields).toEqual(expectedFields)
+      expect(reads).toHaveLength(5)
+      expect(JSON.stringify(binding)).not.toContain('credentialId')
+      expect(JSON.stringify(binding)).not.toContain('p'.repeat(20))
+      const context = supabaseReleaseContext(
+        { ...frozenPlan, supabaseReconciliation: binding },
+        contentDigest,
+        'preview',
+      )
+      const run = { databaseId: 1, runAttempt: 1 } as WorkflowRun
+      const bundle = artifact(context, run)
+      const result = JSON.parse(bundle.files['operator-result.json']!)
+      result.results[0].profile = profileId
+      result.results[0].fields = result.results[0].fields.filter((field: { field: string }) =>
+        expectedFields.includes(field.field),
+      )
+      bundle.files['operator-result.json'] = JSON.stringify(result)
+      rehash(bundle.files)
+      expect(validateSupabaseOutcome(binding, context, run, bundle)).toMatchObject({
+        status: 'verified',
+        managedFields: expectedFields,
+      })
+      for (const field of expectedFields) {
+        const incomplete = structuredClone(bundle)
+        const value = JSON.parse(incomplete.files['operator-result.json']!)
+        value.results[0].fields = value.results[0].fields.filter((entry: { field: string }) => entry.field !== field)
+        incomplete.files['operator-result.json'] = JSON.stringify(value)
+        rehash(incomplete.files)
+        expect(() => validateSupabaseOutcome(binding, context, run, incomplete)).toThrow(
+          'Ops managed target or scope did not converge.',
+        )
+      }
+      for (const invalidFields of [['mailer_subjects_invite'], [...profileFields, 'smtp_pass']]) {
+        const invalidInventory = {
+          ...github,
+          async getRepositoryFile(repository: string, path: string, sha: string) {
+            if (path.includes('/profiles/'))
+              return JSON.stringify({ version: 1, id: profileId, managedFields: invalidFields })
+            return github.getRepositoryFile!(repository, path, sha)
+          },
+        }
+        await expect(bindSupabaseRelease(config, invalidInventory)).rejects.toThrow(
+          'Trusted Ops inventory could not be frozen; no release plan was created.',
+        )
+      }
+    },
+  )
 })
