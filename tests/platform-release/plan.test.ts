@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createPlatformReleasePlan, validatePlatformReleasePlan } from '../../src/platform-release/plan.js'
-import { opsConfig, opsSha, opsWorkflow, managedFields } from './supabase-fixture.js'
+import { opsConfig, opsSha, opsWorkflow } from './supabase-fixture.js'
 import type {
   PlatformReleaseConfig,
   PlatformReleaseGitHubClient,
@@ -102,14 +102,14 @@ describe('platform release planning', () => {
         if (path.includes('/profiles/'))
           return JSON.stringify({
             version: 1,
-            id: 'shared-auth-mail',
-            managedFields: managedFields.filter((field) => field.startsWith('mailer_')),
+            id: 'shared-auth-control',
+            managedFields: [],
           })
         const production = path.endsWith('production.json')
         return JSON.stringify({
           version: 1,
           id: production ? 'production' : 'staging',
-          profileId: 'shared-auth-mail',
+          profileId: 'shared-auth-control',
           projectRef: (production ? 'p' : 's').repeat(20),
           applyProtection: production ? 'protected' : 'standard',
           authRouting: {},
@@ -118,7 +118,14 @@ describe('platform release planning', () => {
       },
     })
     const first = await createPlatformReleasePlan({ config: { ...config, supabaseReconciliation: opsConfig } }, github)
-    expect(first.supabaseReconciliation).toMatchObject({ opsSha, targets: { production: { managedFields } } })
+    expect(first.supabaseReconciliation).toMatchObject({
+      opsSha,
+      targets: {
+        production: {
+          managedFields: ['hook_send_email_enabled', 'hook_send_email_uri', 'site_url', 'uri_allow_list'],
+        },
+      },
+    })
     sourceSha = '0'.repeat(40)
     expect(
       (await createPlatformReleasePlan({ config: { ...config, supabaseReconciliation: opsConfig } }, github)).digest,
