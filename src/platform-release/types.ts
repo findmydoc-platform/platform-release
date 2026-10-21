@@ -151,6 +151,7 @@ export type ReleaseContentChange = {
 }
 
 export type PlatformReleaseContent = {
+  title?: string
   changes: ReleaseContentChange[]
   githubSummaries?: Record<PlatformRepositoryKey, string>
   highlights: string[]
@@ -207,6 +208,7 @@ export type ReleaseContentV3 = {
 }
 
 export type PlatformReleaseManifestV3 = {
+  title?: string
   changes: ReleaseContentChangeV3[]
   components: Array<
     Omit<PlatformReleaseManifestComponent, 'deploymentRun' | 'key'> & {

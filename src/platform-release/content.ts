@@ -38,6 +38,13 @@ function requireEditorialText(value: unknown, label: string, maximum: number): s
   return text
 }
 
+function requireShortTitle(value: unknown, label: string): string {
+  if (typeof value === 'string' && /[\r\n]/.test(value)) {
+    throw new Error(`${label} must be one non-empty line with at most 65 characters.`)
+  }
+  return requireEditorialText(value, label, 65)
+}
+
 function pullRequestKey(repository: string, number: number): string {
   return `${repository}#${number}`
 }
@@ -57,9 +64,11 @@ export function validateReleaseContent(
 ): PlatformReleaseContent {
   const value = requireObject(candidate, 'Release content')
   const hasGithubSummaries = Object.hasOwn(value, 'githubSummaries')
-  requireExactKeys(value, ['changes', 'highlights', 'schemaVersion', 'summary', ...(hasGithubSummaries ? ['githubSummaries'] : [])], 'Release content')
+  const hasTitle = Object.hasOwn(value, 'title')
+  requireExactKeys(value, ['changes', 'highlights', 'schemaVersion', 'summary', ...(hasTitle ? ['title'] : []), ...(hasGithubSummaries ? ['githubSummaries'] : [])], 'Release content')
   if (value.schemaVersion !== 1) throw new Error('Unsupported release content schema.')
-  const summary = requireEditorialText(value.summary, 'Release summary', 280)
+  const title = hasTitle ? requireShortTitle(value.title, 'Release title') : undefined
+  const summary = requireEditorialText(value.summary, 'Release summary', hasTitle ? 160 : 280)
   const githubSummaries = hasGithubSummaries ? readGithubSummaries(value.githubSummaries) : undefined
   if (!Array.isArray(value.changes) || value.changes.length === 0) {
     throw new Error('Release content must contain at least one change.')
@@ -129,7 +138,9 @@ export function validateReleaseContent(
       pullRequests,
       section: change.section as ReleaseContentSection,
       summary: requireEditorialText(change.summary, `Change ${id} summary`, 360),
-      title: requireEditorialText(change.title, `Change ${id} title`, 120),
+      title: hasTitle
+        ? requireShortTitle(change.title, `Change ${id} title`)
+        : requireEditorialText(change.title, `Change ${id} title`, 120),
       visualUrls,
     }
   })
@@ -149,7 +160,7 @@ export function validateReleaseContent(
     highlightSet.add(highlight)
     return highlight
   })
-  return { changes, ...(githubSummaries ? { githubSummaries } : {}), highlights, schemaVersion: 1, summary }
+  return { changes, ...(githubSummaries ? { githubSummaries } : {}), highlights, schemaVersion: 1, summary, ...(title === undefined ? {} : { title }) }
 }
 
 export function computeReleaseContentDigest(content: PlatformReleaseContent): string {
@@ -178,8 +189,9 @@ export function releaseContentTemplate(plan: PlatformReleasePlan): PlatformRelea
   })))
   return {
     changes,
+    title: '',
     githubSummaries: { dashboard: '', website: '' },
-    highlights: changes.slice(0, 6).map((change) => change.id),
+    highlights: [],
     schemaVersion: 1,
     summary: '',
   }
@@ -200,6 +212,7 @@ const KIND_LABELS: Record<ReleaseContentKind, string> = {
 export function renderReleaseContentPreview(content: PlatformReleaseContent): string {
   const highlights = content.highlights.map((id) => content.changes.find((change) => change.id === id))
   return [
+    ...(content.title === undefined ? [] : [content.title, '']),
     content.summary,
     '',
     'Highlights',

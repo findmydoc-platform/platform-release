@@ -69,9 +69,9 @@ describe('platform release manifest v2', () => {
 })
 
 describe('release manifest v3', () => {
-  it('keeps a native joint release distinct from silent application imports', () => {
+  it.each([undefined, 'Bewertungen auf der Website'])('keeps native title %s and legacy absence distinct from silent application imports', (title) => {
     const manifest = createPlatformReleaseManifestV3({
-      config, content: { ...content, githubSummaries: { dashboard: 'No dashboard source changes.', website: 'This release adds patient reviews.' } }, contentDigest: 'b'.repeat(64), plan,
+      config, content: { ...content, ...(title === undefined ? {} : { title }), githubSummaries: { dashboard: 'No dashboard source changes.', website: 'This release adds patient reviews.' } }, contentDigest: 'b'.repeat(64), plan,
       releases: {
         dashboard: { body: '', draft: true, id: 1, immutable: false, manifestAttached: false,
           platformPublishedAt: '2026-08-12T12:00:00.000Z', preparedAt: '2026-08-12T11:00:00Z',
@@ -87,9 +87,15 @@ describe('release manifest v3', () => {
     })
     expect(manifest).toMatchObject({ notificationMode: 'standard', releaseMode: 'platform', schemaVersion: 3, source: { kind: 'native' } })
     expect(manifest.summary).toBe(content.summary)
+    if (title === undefined) expect(manifest).not.toHaveProperty('title')
+    else expect(manifest).toHaveProperty('title', title)
     expect(manifest.changes[0]?.summary).toBe(content.changes[0]?.summary)
     expect(manifest).not.toHaveProperty('githubSummaries')
     expect(manifest.changes[0]).toMatchObject({ commitShas: [], componentKeys: ['website'] })
     expect(validateReleaseManifest(JSON.parse(serializeReleaseManifest(manifest)))).toEqual(manifest)
+    for (const title of ['', 'a\nb', 'a'.repeat(66), null]) {
+      expect(() => validateReleaseManifest({ ...manifest, title })).toThrow('editorial')
+    }
+    expect(() => validateReleaseManifest({ ...manifest, title: 'Andere Bewertung' })).toThrow('digest mismatch')
   })
 })

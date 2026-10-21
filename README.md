@@ -34,6 +34,14 @@ Fork pull requests can read default-branch Actions caches, so private package fi
 - Deployment evidence is optional in v3 and is never fabricated.
 - Imported GitHub releases use `notificationMode: silent`; native releases use `standard`.
 
+## Release titles and summaries
+
+New native content templates include a German `title` of at most 65 characters. With a title present, the German `summary` has at most 160 characters and each change title has at most 65. Change descriptions keep their existing 360-character limit. Write one or two short summary sentences that explain the main benefit and availability. Rewrite text that exceeds a limit; the runner does not truncate it.
+
+The optional title is part of the content digest and Manifest v3 digest. Deploy a compatible FounderOps consumer before adopting this runner for new titled content. FounderOps displays the title separately from the summary and uses the version as the heading for older releases. GitHub release titles and notification titles remain version-based.
+
+Titleless content keeps its previous limits, serialized fields, and digests. Manifest v2 and release imports are unchanged. Do not add a title when retrying an approved historical release.
+
 ## Local release import
 
 The import path is intentionally separate from publication. It cannot create tags, GitHub Releases, deployments, or chat messages.

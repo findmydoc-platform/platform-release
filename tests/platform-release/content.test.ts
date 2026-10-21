@@ -3,6 +3,7 @@ import {
   computeReleaseContentDigest,
   releaseContentTemplate,
   renderRepositoryReleaseNotes,
+  renderReleaseContentPreview,
   validateReleaseContent,
 } from '../../src/platform-release/content.js'
 import type { PlatformReleaseContent, PlatformReleasePlan } from '../../src/platform-release/types.js'
@@ -33,11 +34,33 @@ function content(): PlatformReleaseContent {
 
 describe('structured release content', () => {
   it('keeps the generated template invalid until editorial text is supplied', () => {
-    expect(() => validateReleaseContent(plan, releaseContentTemplate(plan))).toThrow('Release summary')
+    const template = releaseContentTemplate(plan)
+    expect(template.highlights).toEqual([])
+    expect(() => validateReleaseContent(plan, template)).toThrow()
   })
 
   it('accepts one cross-cutting change that owns both pull requests', () => {
     expect(validateReleaseContent(plan, content())).toEqual(content())
+  })
+
+  it('validates and digest-binds compact titles without changing legacy content', () => {
+    const legacy = { ...content(), summary: 'a'.repeat(280), changes: [{ ...content().changes[0]!, title: 'a'.repeat(120) }] }
+    expect(validateReleaseContent(plan, legacy)).toEqual(legacy)
+    expect(validateReleaseContent(plan, legacy)).not.toHaveProperty('title')
+    const titled = { ...content(), title: 'Klinikgruppen im Dashboard vorbereitet' }
+    expect(validateReleaseContent(plan, titled)).toEqual(titled)
+    expect(computeReleaseContentDigest(titled)).not.toBe(computeReleaseContentDigest(content()))
+    expect(renderReleaseContentPreview(titled)).toContain(`${titled.title}\n\n${titled.summary}`)
+    expect(releaseContentTemplate(plan)).toHaveProperty('title', '')
+    for (const title of ['', '   ', 'a\nb', '\nKlinikgruppen', 'a'.repeat(66), null]) {
+      expect(() => validateReleaseContent(plan, { ...content(), title })).toThrow('Release title')
+    }
+    expect(() => validateReleaseContent(plan, { ...titled, summary: 'a'.repeat(161) })).toThrow('Release summary')
+    expect(() => validateReleaseContent(plan, { ...titled, changes: legacy.changes })).toThrow('title')
+    for (const title of ['', '\nBewertungen', 'a\nb', 'a'.repeat(66)]) {
+      expect(() => validateReleaseContent(plan, { ...titled, changes: [{ ...content().changes[0]!, title }] })).toThrow('title')
+    }
+    expect(validateReleaseContent(plan, { ...titled, title: 'a'.repeat(65), summary: 'a'.repeat(160), changes: [{ ...content().changes[0]!, title: 'a'.repeat(65) }] })).toBeDefined()
   })
 
   it('rejects missing and duplicate pull request assignments', () => {
