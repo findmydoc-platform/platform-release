@@ -250,11 +250,13 @@ class ApplyGitHub implements PlatformReleaseGitHubClient {
 
 class FounderOps implements FounderOpsReleaseClient {
   calls = 0
+  manifests: string[] = []
   constructor(
     private readonly events: string[],
     private readonly failure = false,
   ) {}
-  async ingestManifest() {
+  async ingestManifest(input: Parameters<FounderOpsReleaseClient['ingestManifest']>[0]) {
+    this.manifests.push(input.manifest)
     this.calls += 1
     this.events.push('founderops')
     if (this.failure) throw new Error('FounderOps failed')
@@ -291,6 +293,23 @@ const apply = (
 ) => applyPlatformRelease(input, github, founderOps, store, { ...options, supabaseRunStore: github.ops.store })
 
 describe('platform release apply', () => {
+  it('retains the editorial title and exact manifest through publication and FounderOps retry', async () => {
+    const input = applyInput()
+    input.content.title = 'Bewertungen auf der Website'
+    input.confirmContentDigest = computeReleaseContentDigest(input.content)
+    const github = new ApplyGitHub()
+    const failed = new FounderOps(github.events, true)
+    const options = { pollIntervalMs: 0, timeoutMs: 100 }
+    await expect(apply(input, github, failed, announcementStore, options)).rejects.toThrow('FounderOps failed')
+    const replay = new FounderOps(github.events)
+    await apply(input, github, replay, announcementStore, options)
+    expect(replay.manifests).toEqual(failed.manifests)
+    expect(JSON.parse(replay.manifests[0]!)).toMatchObject({ title: input.content.title })
+    expect(github.manifests[0]).toBe(replay.manifests[0])
+    expect(github.manifests[0]).toBe(github.manifests[1])
+    expect(github.releases).toHaveLength(2)
+  })
+
   it.each(['missing', 'failed'])(
     'preserves published components with verified Ops evidence and %s application evidence',
     async (state) => {

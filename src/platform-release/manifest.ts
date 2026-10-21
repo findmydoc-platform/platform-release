@@ -114,6 +114,7 @@ export function createPlatformReleaseManifestV3(input: {
     }
   })
   const withoutDigest: Omit<PlatformReleaseManifestV3, 'manifestDigest'> = {
+    ...(input.content.title === undefined ? {} : { title: input.content.title }),
     changes,
     components,
     contentDigest: input.contentDigest,
@@ -170,6 +171,13 @@ export function validateReleaseManifest(candidate: unknown): ReleaseManifest {
   const manifest = candidate as ReleaseManifest
   if (manifest.schemaVersion === 2) return validatePlatformReleaseManifest(candidate)
   if (manifest.schemaVersion !== 3) throw new Error('Unsupported release manifest schema.')
+  if (Object.hasOwn(manifest, 'title')) {
+    const editorialLine = (value: unknown, maximum: number) => typeof value === 'string' && Boolean(value.trim()) && value.length <= maximum && !/[\r\n]/.test(value)
+    if (!editorialLine(manifest.title, 65) || !editorialLine(manifest.summary, 160) || !Array.isArray(manifest.changes) ||
+      !manifest.changes.every((change) => change && editorialLine(change.title, 65) && editorialLine(change.summary, 360))) {
+      throw new Error('Release manifest v3 editorial text is invalid.')
+    }
+  }
   if (!/^v\d+\.\d+\.\d+$/.test(manifest.version) || !/^[0-9a-f]{64}$/.test(manifest.planDigest) ||
     !/^[0-9a-f]{64}$/.test(manifest.contentDigest) || !/^[0-9a-f]{64}$/.test(manifest.manifestDigest)) {
     throw new Error('Release manifest identity is invalid.')
