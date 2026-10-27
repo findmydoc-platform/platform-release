@@ -226,6 +226,7 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
   program
     .name('fmd-platform-release')
     .description('Publish and archive findmydoc application and platform releases')
+    .enablePositionalOptions()
     .version('0.3.0')
   program.configureOutput({
     outputError: (value, write) => write(value),
