@@ -143,16 +143,15 @@ describe('platform release workflows', () => {
       'permission-pull-requests': 'read',
       repositories: 'website\nclinic-dashboard\n',
     })
-    const opsToken = actionStep(workflow, 'apply', 'Create Ops reconciliation token')
+    const opsToken = actionStep(workflow, 'apply', 'Create Ops archive token')
     expect(opsToken.with).toMatchObject({
-      'permission-actions': 'write',
       'permission-contents': 'read',
       repositories: 'ops\n',
     })
+    expect(opsToken.with?.['permission-actions']).toBeUndefined()
     expect(opsToken.with?.['permission-contents']).not.toBe('write')
-    const opsPlanToken = actionStep(workflow, 'plan', 'Create Ops planning token')
-    expect(opsPlanToken.with).toMatchObject({ 'permission-contents': 'read', repositories: 'ops\n' })
-    expect(opsPlanToken.with?.['permission-actions']).toBeUndefined()
+    expect(workflow.jobs.plan.steps?.some((step) => step.id === 'ops-token')).toBe(false)
+    expect(namedStep(workflow, 'apply', 'Apply platform release').env).not.toHaveProperty('GITHUB_OPS_TOKEN')
     expect(provenance.env).toMatchObject({
       CURRENT_SHA: '${{ github.sha }}',
       GH_TOKEN: '${{ github.token }}',

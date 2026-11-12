@@ -3,11 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { canonicalJson, sha256 } from './canonical.js'
 import { assertManualVersion, compareVersions, highestBump, nextVersion } from './semver.js'
 import { boundedVisualCandidates } from './visuals.js'
-import {
-  bindSupabaseRelease,
-  validateSupabaseReleaseBinding,
-  validateSupabaseReleaseConfig,
-} from './supabase-reconciliation.js'
+import { validateSupabaseReleaseBinding, validateSupabaseReleaseConfig } from './supabase-reconciliation.js'
 import type {
   PlatformReleaseConfig,
   PlatformReleaseGitHubClient,
@@ -36,21 +32,15 @@ export function validatePlatformReleasePlan(plan: PlatformReleasePlan): void {
   if (plan.digest !== expected) throw new Error(`Platform release plan digest mismatch: expected ${expected}.`)
 }
 
-export function validatePlanAgainstConfig(
-  plan: PlatformReleasePlan,
-  config: PlatformReleaseConfig,
-  requireReconciliation = false,
-): void {
-  if (requireReconciliation && (!config.supabaseReconciliation || !plan.supabaseReconciliation)) {
-    throw new Error('Apply requires a new approved plan with frozen Ops reconciliation scope.')
-  }
+export function validatePlanAgainstConfig(plan: PlatformReleasePlan, config: PlatformReleaseConfig): void {
   if (plan.supabaseReconciliation) {
-    if (!config.supabaseReconciliation) throw new Error('Frozen Ops binding has no trusted configuration.')
-    validateSupabaseReleaseConfig(config.supabaseReconciliation)
     validateSupabaseReleaseBinding(plan.supabaseReconciliation)
-    for (const field of ['repository', 'branch', 'workflow'] as const) {
-      if (plan.supabaseReconciliation[field] !== config.supabaseReconciliation[field])
-        throw new Error('Frozen Ops binding does not match trusted configuration.')
+    if (config.supabaseReconciliation) {
+      validateSupabaseReleaseConfig(config.supabaseReconciliation)
+      for (const field of ['repository', 'branch', 'workflow'] as const) {
+        if (plan.supabaseReconciliation[field] !== config.supabaseReconciliation[field])
+          throw new Error('Frozen Ops binding does not match trusted configuration.')
+      }
     }
   }
   const plannedKeys = Object.keys(plan.repositories).sort()
@@ -164,9 +154,6 @@ export async function createPlatformReleasePlan(
   const version = input.manualVersion ?? nextVersion(currentVersion, bump)
   if (input.manualVersion) assertManualVersion(input.manualVersion, currentVersion)
   const planWithoutDigest: Omit<PlatformReleasePlan, 'digest'> = {
-    ...(input.config.supabaseReconciliation
-      ? { supabaseReconciliation: await bindSupabaseRelease(input.config.supabaseReconciliation, github) }
-      : {}),
     breakingChanges,
     createdAt: new Date().toISOString(),
     highestBump: bump,

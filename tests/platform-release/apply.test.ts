@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { applyPlatformRelease } from '../../src/platform-release/apply.js'
 import { computeReleaseContentDigest, renderRepositoryReleaseNotes } from '../../src/platform-release/content.js'
 import { computePlanDigest, platformDeploymentWorkflowTitle } from '../../src/platform-release/plan.js'
-import { opsBinding, opsConfig, opsFixture } from './supabase-fixture.js'
-import { reconcileSupabaseRelease } from '../../src/platform-release/supabase-reconciliation.js'
+import { opsBinding, opsFixture } from './supabase-fixture.js'
 import type {
   FounderOpsReleaseClient,
   PlatformReleaseConfig,
@@ -16,7 +15,6 @@ import type {
 } from '../../src/platform-release/types.js'
 
 const config: PlatformReleaseConfig = {
-  supabaseReconciliation: opsConfig,
   founderOps: { baseUrl: 'https://founder-ops.findmydoc.eu', ingestPath: '/api/team/platform-releases/v1/releases' },
   platformBaselineVersion: 'v0.45.0',
   repositories: {
@@ -56,7 +54,6 @@ function pullRequest(repository: string, number: number, issues: ReleaseIssue[] 
 
 function plan(): PlatformReleasePlan {
   const value: Omit<PlatformReleasePlan, 'digest'> = {
-    supabaseReconciliation: opsBinding,
     breakingChanges: [],
     createdAt: '2026-08-04T12:00:00.000Z',
     highestBump: 'minor',
@@ -290,7 +287,7 @@ const apply = (
   founderOps: FounderOps,
   store: PlatformReleaseAnnouncementStore,
   options: Parameters<typeof applyPlatformRelease>[4] = {},
-) => applyPlatformRelease(input, github, founderOps, store, { ...options, supabaseRunStore: github.ops.store })
+) => applyPlatformRelease(input, github, founderOps, store, options)
 
 describe('platform release apply', () => {
   it('retains the editorial title and exact manifest through publication and FounderOps retry', async () => {
@@ -310,75 +307,68 @@ describe('platform release apply', () => {
     expect(github.releases).toHaveLength(2)
   })
 
-  it.each(['missing', 'failed'])(
-    'preserves published components with verified Ops evidence and %s application evidence',
-    async (state) => {
-      const input = applyInput()
-      const github = new ApplyGitHub()
-      await reconcileSupabaseRelease(input.plan, input.confirmContentDigest, github, github.ops.store)
-      github.releaseDetails.set(config.repositories.website.repository, {
-        body: renderRepositoryReleaseNotes(input.plan, input.content, 'website'),
-        draft: false,
-        id: 1,
-        immutable: true,
-        manifestAttached: true,
-        preparedAt: '2026-10-01T12:00:00Z',
-        publishedAt: '2026-10-01T12:01:00Z',
-        sha: input.plan.repositories.website.targetSha,
-        url: 'https://example.test',
-      })
-      github.dispatches.push(config.repositories.dashboard.repository)
-      if (state === 'failed') {
-        github.dispatches.push(config.repositories.website.repository)
-        github.failureRepository = config.repositories.website.repository
-      }
-      const before = [...github.dispatches]
-      await expect(
-        apply(input, github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 }),
-      ).rejects.toThrow('Published release deployment evidence is incomplete')
-      expect(github.dispatches).toEqual(before)
-      expect(github.ops.runs.size).toBe(2)
-      expect(github.events.filter((entry) => entry.startsWith('dispatch:'))).toEqual([
-        'dispatch:preview',
-        'dispatch:production',
-      ])
-      expect(github.releases).toEqual([])
-    },
-  )
-  it('verifies all Ops configuration before any deployment and reuses those runs after deployment failure', async () => {
+  it.each(['missing', 'failed'])('preserves published components with %s application evidence', async (state) => {
+    const input = applyInput()
     const github = new ApplyGitHub()
+    github.releaseDetails.set(config.repositories.website.repository, {
+      body: renderRepositoryReleaseNotes(input.plan, input.content, 'website'),
+      draft: false,
+      id: 1,
+      immutable: true,
+      manifestAttached: true,
+      preparedAt: '2026-10-01T12:00:00Z',
+      publishedAt: '2026-10-01T12:01:00Z',
+      sha: input.plan.repositories.website.targetSha,
+      url: 'https://example.test',
+    })
+    github.dispatches.push(config.repositories.dashboard.repository)
+    if (state === 'failed') {
+      github.dispatches.push(config.repositories.website.repository)
+      github.failureRepository = config.repositories.website.repository
+    }
+    const before = [...github.dispatches]
+    await expect(
+      apply(input, github, new FounderOps(github.events), announcementStore, { pollIntervalMs: 0, timeoutMs: 100 }),
+    ).rejects.toThrow('Published release deployment evidence is incomplete')
+    expect(github.dispatches).toEqual(before)
+    expect(github.ops.runs.size).toBe(0)
+    expect(github.events.filter((entry) => entry.startsWith('dispatch:'))).toEqual([])
+    expect(github.releases).toEqual([])
+  })
+  it('deploys and resumes both applications without dispatching or inspecting Ops configuration', async () => {
+    const github = new ApplyGitHub()
+    github.getWorkflowArtifact = async () => {
+      throw new Error('Auth configuration must not be inspected')
+    }
     github.failureRepository = config.repositories.website.repository
     const options = { pollIntervalMs: 0, timeoutMs: 100 }
     await expect(
       apply(applyInput(), github, new FounderOps(github.events), announcementStore, options),
     ).rejects.toThrow('deployment failed')
-    expect(github.events.slice(0, 4)).toEqual([
-      'dispatch:preview',
-      'verified:preview',
-      'dispatch:production',
-      'verified:production',
-    ])
-    expect(github.ops.runs.size).toBe(2)
+    expect(github.events.filter((entry) => entry.startsWith('dispatch:'))).toEqual([])
+    expect(github.ops.runs.size).toBe(0)
     github.failureRepository = undefined
     const result = await apply(applyInput(), github, new FounderOps(github.events), announcementStore, options)
-    expect(result.reconciliation?.environments.production.status).toBe('verified')
-    expect(github.ops.runs.size).toBe(2)
+    expect(result.reconciliation).toBeUndefined()
+    expect(github.ops.runs.size).toBe(0)
+    expect(github.releases).toHaveLength(2)
   })
 
-  it('stops all release mutations when Preview has no authentic convergence evidence', async () => {
+  it('refuses to reinterpret an approved historical Auth-bound plan', async () => {
     const github = new ApplyGitHub()
-    github.getWorkflowArtifact = async () => {
-      throw new Error('missing audit')
-    }
+    const input = applyInput()
+    input.plan.supabaseReconciliation = opsBinding
+    input.plan.digest = computePlanDigest(input.plan)
+    input.confirmDigest = input.plan.digest
     await expect(
-      apply(applyInput(), github, new FounderOps(github.events), announcementStore, {
+      apply(input, github, new FounderOps(github.events), announcementStore, {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
-    ).rejects.toThrow('Ops preview')
+    ).rejects.toThrow('original runner')
     expect(github.dispatches).toEqual([])
     expect(github.releases).toEqual([])
-    expect(github.ops.runs.size).toBe(1)
+    expect(github.ops.runs.size).toBe(0)
   })
   it('preserves a published component by refusing new deployments when frozen workflow evidence is missing', async () => {
     const input = applyInput()
@@ -399,7 +389,7 @@ describe('platform release apply', () => {
         pollIntervalMs: 0,
         timeoutMs: 100,
       }),
-    ).rejects.toThrow('Ops preview reconciliation could not be verified')
+    ).rejects.toThrow('Published release deployment evidence is incomplete')
     expect(github.dispatches).toEqual([])
     expect(github.ops.runs.size).toBe(0)
     expect(github.releases).toEqual([])

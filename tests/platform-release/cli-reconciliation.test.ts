@@ -10,7 +10,7 @@ import { computeReleaseContentDigest } from '../../src/platform-release/content.
 import { opsBinding, opsFixture } from './supabase-fixture.js'
 import type { PlatformReleaseGitHubClient, PlatformReleaseContent } from '../../src/platform-release/types.js'
 
-it('returns a fixed JSON error and makes no app writes when the approved Ops apply has no valid audit', async () => {
+it('preserves historical Ops-bound plans by refusing to reinterpret them or create clients', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'release-cli-'))
   const previousExitCode = process.exitCode
   const output: string[] = []
@@ -121,17 +121,17 @@ it('returns a fixed JSON error and makes no app writes when the approved Ops app
     ])
     expect(JSON.parse(output.join(''))).toEqual({
       status: 'failed',
-      error: { message: 'Ops preview reconciliation could not be verified; release mutations are stopped.' },
+      error: { message: 'Resume plans containing Ops reconciliation scope with their original runner.' },
     })
     expect(appWrites).toBe(0)
-    expect(fixture.runs.size).toBe(1)
+    expect(fixture.runs.size).toBe(0)
   } finally {
     process.exitCode = previousExitCode
     await rm(directory, { recursive: true, force: true })
   }
 })
 
-it('requires new frozen Ops approval before credentials or live clients for legacy plans', async () => {
+it('rejects an untrusted application contract before credentials or live clients', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'release-cli-'))
   const planPath = join(directory, 'plan.json')
   const value = {
@@ -173,7 +173,7 @@ it('requires new frozen Ops approval before credentials or live clients for lega
     expect(JSON.parse(output.join(''))).toEqual({
       status: 'failed',
       error: {
-        message: 'Apply requires a new approved plan with frozen Ops reconciliation scope.',
+        message: 'Frozen plan dashboard.branch does not match the trusted platform release configuration.',
       },
     })
     expect(clientsCreated).toBe(0)

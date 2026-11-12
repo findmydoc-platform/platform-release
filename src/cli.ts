@@ -64,7 +64,6 @@ type ApplyOptions = {
   content: string
   json?: boolean
   manifestOutput: string
-  reconciliationOutput: string
   plan: string
 }
 type StatusOptions = { json?: boolean; plan: string; content?: string }
@@ -321,11 +320,6 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
       'artifacts/platform-release/platform-release.json',
     )
     .option('--config-path <path>', 'trusted platform release configuration path', DEFAULT_PLATFORM_RELEASE_CONFIG_PATH)
-    .option(
-      '--reconciliation-output <path>',
-      'write verified Ops release evidence',
-      'artifacts/platform-release/supabase-reconciliation.json',
-    )
     .option('--announce', 'send the compact Google Chat announcement after FounderOps ingestion')
     .option('--json', 'emit JSON output')
     .action(async (options: ApplyOptions) => {
@@ -335,7 +329,9 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
           loadPlatformReleaseConfig(options.configPath),
           readPlatformReleasePlan(options.plan),
         ])
-        validatePlanAgainstConfig(plan, config, true)
+        validatePlanAgainstConfig(plan, config)
+        if (plan.supabaseReconciliation)
+          throw new Error('Resume plans containing Ops reconciliation scope with their original runner.')
         const content = await readReleaseContent(options.content, plan)
         const contentDigest = computeReleaseContentDigest(content)
         if (
@@ -360,12 +356,10 @@ export function createProgram(runtimeOverrides: Partial<CliRuntime> = {}): Comma
             confirmVersion: options.confirmVersion,
             webhook: process.env.GOOGLE_CHAT_WEBHOOK_URL,
             onManifest: (value) => save(options.manifestOutput, value),
-            onReconciliation: (value) => save(options.reconciliationOutput, `${JSON.stringify(value, null, 2)}\n`),
           },
           runtime.createGitHubClient(),
           runtime.createFounderOpsClient(config),
           runtime.createAnnouncementStore(),
-          { supabaseRunStore: runtime.createSupabaseRunStore() },
         )
         writeJson(result, runtime.writeStdout)
       } catch (error) {
