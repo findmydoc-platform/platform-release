@@ -2,7 +2,6 @@ import { announcePlatformReleaseOnce } from './announce.js'
 import { computeReleaseContentDigest, renderRepositoryReleaseNotes, validateReleaseContent } from './content.js'
 import { createPlatformReleaseManifestV3, serializeReleaseManifest } from './manifest.js'
 import { platformDeploymentWorkflowTitle, validatePlanAgainstConfig, validatePlatformReleasePlan } from './plan.js'
-import { reconcileSupabaseRelease } from './supabase-reconciliation.js'
 import type {
   PlatformReleaseApplyResult,
   PlatformReleaseConfig,
@@ -14,8 +13,6 @@ import type {
   PlatformReleasePlan,
   PlatformRepositoryKey,
   WorkflowRun,
-  SupabaseReleaseAttestation,
-  SupabaseReleaseRunStore,
 } from './types.js'
 
 const REPOSITORY_KEYS: PlatformRepositoryKey[] = ['dashboard', 'website']
@@ -126,7 +123,6 @@ export async function applyPlatformRelease(
     confirmVersion: string
     content: PlatformReleaseContent
     onManifest?: (manifest: string) => Promise<void>
-    onReconciliation?: (attestation: SupabaseReleaseAttestation) => Promise<void>
     plan: PlatformReleasePlan
     webhook?: string
   },
@@ -137,11 +133,13 @@ export async function applyPlatformRelease(
     now?: () => Date
     pollIntervalMs?: number
     timeoutMs?: number
-    supabaseRunStore?: SupabaseReleaseRunStore
   } = {},
 ): Promise<PlatformReleaseApplyResult> {
   validatePlatformReleasePlan(input.plan)
-  validatePlanAgainstConfig(input.plan, input.config, true)
+  validatePlanAgainstConfig(input.plan, input.config)
+  if (input.plan.supabaseReconciliation) {
+    throw new Error('Resume plans containing Ops reconciliation scope with their original runner.')
+  }
   const content = validateReleaseContent(input.plan, input.content)
   const contentDigest = computeReleaseContentDigest(content)
   if (input.confirmDigest !== input.plan.digest) {
@@ -176,15 +174,6 @@ export async function applyPlatformRelease(
     pollIntervalMs: options.pollIntervalMs ?? 10_000,
     timeoutMs: options.timeoutMs ?? 45 * 60_000,
   }
-  if (!options.supabaseRunStore) throw new Error('Durable Ops invocation mapping is required before apply.')
-  const reconciliation = await reconcileSupabaseRelease(
-    input.plan,
-    contentDigest,
-    github,
-    options.supabaseRunStore,
-    workflowOptions,
-  )
-  await input.onReconciliation?.(reconciliation)
   const workflowEntries = await Promise.all(
     REPOSITORY_KEYS.map(
       async (key) => [key, await ensureDeployment(input.plan, key, github, workflowOptions)] as const,
@@ -300,7 +289,6 @@ export async function applyPlatformRelease(
   }
 
   return {
-    reconciliation,
     announcement,
     contentDigest,
     digest: input.plan.digest,

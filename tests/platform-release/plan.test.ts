@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createPlatformReleasePlan, validatePlatformReleasePlan } from '../../src/platform-release/plan.js'
-import { opsConfig, opsSha, opsWorkflow } from './supabase-fixture.js'
+import { opsConfig } from './supabase-fixture.js'
 import type {
   PlatformReleaseConfig,
   PlatformReleaseGitHubClient,
@@ -86,50 +86,20 @@ class PlanningGitHub implements PlatformReleaseGitHubClient {
 }
 
 describe('platform release planning', () => {
-  it('includes the frozen Ops source and full managed scope in the release approval digest', async () => {
-    const base = new PlanningGitHub()
-    let sourceSha = opsSha
-    const github = Object.assign(base, {
-      async getBranchSha(repository: string) {
-        return repository === opsConfig.repository
-          ? sourceSha
-          : repository.endsWith('/website')
-            ? 'website-target'
-            : 'dashboard-target'
-      },
-      async getRepositoryFile(_repository: string, path: string) {
-        if (path.startsWith('.github/')) return opsWorkflow
-        if (path.includes('/profiles/'))
-          return JSON.stringify({
-            version: 1,
-            id: 'shared-auth-control',
-            managedFields: [],
-          })
-        const production = path.endsWith('production.json')
-        return JSON.stringify({
-          version: 1,
-          id: production ? 'production' : 'staging',
-          profileId: 'shared-auth-control',
-          projectRef: (production ? 'p' : 's').repeat(20),
-          applyProtection: production ? 'protected' : 'standard',
-          authRouting: {},
-          nativeMailSuppression: true,
-        })
-      },
+  it('plans without reading Ops or binding Auth configuration, including with historical config', async () => {
+    const github = Object.assign(new PlanningGitHub(), {
+      getRepositoryFile: vi.fn(async () => {
+        throw new Error('Auth configuration must not be inspected')
+      }),
     })
-    const first = await createPlatformReleasePlan({ config: { ...config, supabaseReconciliation: opsConfig } }, github)
-    expect(first.supabaseReconciliation).toMatchObject({
-      opsSha,
-      targets: {
-        production: {
-          managedFields: ['hook_send_email_enabled', 'hook_send_email_uri', 'site_url', 'uri_allow_list'],
-        },
-      },
-    })
-    sourceSha = '0'.repeat(40)
-    expect(
-      (await createPlatformReleasePlan({ config: { ...config, supabaseReconciliation: opsConfig } }, github)).digest,
-    ).not.toBe(first.digest)
+    const branches = vi.spyOn(github, 'getBranchSha')
+    const plan = await createPlatformReleasePlan({ config: { ...config, supabaseReconciliation: opsConfig } }, github)
+    expect(plan.supabaseReconciliation).toBeUndefined()
+    expect(github.getRepositoryFile).not.toHaveBeenCalled()
+    expect(branches.mock.calls.map(([repository]) => repository).sort()).toEqual([
+      'findmydoc-platform/clinic-dashboard',
+      'findmydoc-platform/website',
+    ])
   })
   it('freezes both repositories and selects the highest combined bump', async () => {
     const plan = await createPlatformReleasePlan({ config }, new PlanningGitHub())

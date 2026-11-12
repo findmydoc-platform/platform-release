@@ -6,10 +6,9 @@ This repository contains only the deterministic release engine, reusable deploym
 
 Internal operating documentation is maintained in the Operations repository.
 
-Platform release plans freeze the Ops source and complete opted-in Supabase scope. Approved applies reconcile Preview,
-then Production, before deploying applications. The Runner verifies each exact workflow run's audited convergence
-and reuses those runs on resume. See [the reconciliation contract](docs/supabase-reconciliation.md) for approval,
-evidence, recovery, and GitHub App installation prerequisites.
+Platform release plans freeze both application commits. Deployment and publication do not inspect or change
+Supabase Auth configuration. Auth emails belong to the central transactional mail service; Ops owns the separate
+Auth configuration. See [configuration ownership and historical evidence](docs/supabase-reconciliation.md).
 
 ## GitHub release notes
 
