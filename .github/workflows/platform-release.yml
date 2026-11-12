@@ -23,7 +23,7 @@ on:
         required: false
         type: string
       archive_ref:
-        description: Immutable Ops archive commit for resuming an archived apply
+        description: Immutable merged Ops archive commit for applying an approved release
         required: false
         type: string
       confirm_version:
@@ -234,14 +234,23 @@ jobs:
       - name: Restore immutable Ops archive artifacts
         if: inputs.archive_ref != ''
         env:
-          ARCHIVE_PLAN: ${{ secrets.PLATFORM_RELEASE_ARCHIVE_PLAN }}
-          ARCHIVE_CONTENT: ${{ secrets.PLATFORM_RELEASE_ARCHIVE_CONTENT }}
+          GH_TOKEN: ${{ steps.ops-token.outputs.token }}
+          ARCHIVE_REF: ${{ inputs.archive_ref }}
+          CONFIRM_VERSION: ${{ inputs.confirm_version }}
         run: |
           set -euo pipefail
-          test -n "$ARCHIVE_PLAN"
-          test -n "$ARCHIVE_CONTENT"
+          [[ "$ARCHIVE_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CONFIRM_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          comparison_status="$(gh api "repos/findmydoc-platform/ops/compare/${ARCHIVE_REF}...main" --jq '.status')"
+          case "$comparison_status" in
+            identical | ahead) ;;
+            *) echo "Archive commit must belong to Ops main history." >&2; exit 1 ;;
+          esac
           mkdir -p artifacts/platform-release
-          node --input-type=module -e "import { writeFileSync } from 'node:fs'; writeFileSync('artifacts/platform-release/plan.json', process.env.ARCHIVE_PLAN + '\\n'); writeFileSync('artifacts/platform-release/release-content.json', process.env.ARCHIVE_CONTENT + '\\n')"
+          for filename in plan.json release-content.json; do
+            gh api "repos/findmydoc-platform/ops/contents/platform-releases/${CONFIRM_VERSION}/${filename}?ref=${ARCHIVE_REF}" \
+              --header 'Accept: application/vnd.github.raw+json' > "artifacts/platform-release/${filename}"
+          done
 
       - name: Verify archived plan provenance
         if: inputs.archive_ref != ''
