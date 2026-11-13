@@ -81,11 +81,22 @@ process.stdout.write(response.raw === undefined ? JSON.stringify(response.body) 
     execute(responses: Response[], phase = 'initial', overrides: Record<string, string> = {}) {
       writeFileSync(environment.CI_STUB_RESPONSES, JSON.stringify(responses))
       writeFileSync(environment.CI_STUB_REQUESTS, '[]')
-      return spawnSync('bash', [path.join(directory, 'dashboard-main-ci-gate.sh'), phase], {
+      const result = spawnSync('bash', [path.join(directory, 'dashboard-main-ci-gate.sh'), phase], {
         env: { ...environment, ...overrides },
         encoding: 'utf8',
         timeout: 5000,
       })
+      expect(result.error, result.stderr).toBeUndefined()
+      expect(result.signal, result.stderr).toBeNull()
+      expect(result.status, result.stderr).not.toBeNull()
+      const requests = JSON.parse(readFileSync(environment.CI_STUB_REQUESTS, 'utf8')) as string[][]
+      expect(requests.length, result.stderr).toBeLessThanOrEqual(responses.length)
+      expect(requests, result.stderr).toEqual(
+        responses
+          .slice(0, requests.length)
+          .map((response) => ['api', '--hostname', 'github.com', '--method', 'GET', response.endpoint]),
+      )
+      return { ...result, requests }
     },
   }
 }
@@ -120,17 +131,17 @@ describe('dashboard main CI evidence gate', () => {
   ])('rejects mismatched or incomplete %s evidence', (_name, overrides) => {
     const responses = responsesFor()
     responses[1]!.body = { total_count: 1, workflow_runs: [{ ...run, ...overrides }] }
-    expect(createGate().execute(responses).status).not.toBe(0)
+    expect(createGate().execute(responses).status).toBe(1)
   })
 
   it.each(['queued', 'in_progress', 'waiting', 'pending', 'requested'])('rejects a %s current attempt', (status) => {
-    expect(createGate().execute(responsesFor({ ...run, status, conclusion: '' })).status).not.toBe(0)
+    expect(createGate().execute(responsesFor({ ...run, status, conclusion: '' })).status).toBe(1)
   })
 
   it.each(['failure', 'cancelled', 'timed_out', 'action_required', 'neutral', 'skipped', 'stale', 'startup_failure'])(
     'rejects a completed %s attempt',
     (conclusion) => {
-      expect(createGate().execute(responsesFor({ ...run, conclusion })).status).not.toBe(0)
+      expect(createGate().execute(responsesFor({ ...run, conclusion })).status).toBe(1)
     },
   )
 
@@ -146,7 +157,7 @@ describe('dashboard main CI evidence gate', () => {
   ])('rejects %s', (_name, body) => {
     const responses = responsesFor()
     responses[1]!.body = body
-    expect(createGate().execute(responses).status).not.toBe(0)
+    expect(createGate().execute(responses).status).toBe(1)
   })
 
   it.each([
@@ -157,7 +168,7 @@ describe('dashboard main CI evidence gate', () => {
   ])('rejects an unexpected workflow identity %j', (overrides) => {
     const responses = responsesFor()
     responses[0]!.body = { ...workflow, ...overrides }
-    expect(createGate().execute(responses).status).not.toBe(0)
+    expect(createGate().execute(responses).status).toBe(1)
   })
 
   it.each(['in_progress', 'failure', 'cancelled', 'success'])(
@@ -170,38 +181,38 @@ describe('dashboard main CI evidence gate', () => {
         status: state === 'in_progress' ? 'in_progress' : 'completed',
         conclusion: state === 'in_progress' ? null : state,
       }
-      expect(createGate().execute(responses).status).not.toBe(0)
+      expect(createGate().execute(responses).status).toBe(1)
     },
   )
 
   it('rejects an attempt endpoint that does not match the current successful run', () => {
     const responses = responsesFor()
     responses[3]!.body = { ...run, run_attempt: 1 }
-    expect(createGate().execute(responses).status).not.toBe(0)
+    expect(createGate().execute(responses).status).toBe(1)
   })
 
   it('rejects a rerun started after reading a historical successful attempt', () => {
     const responses = responsesFor()
     responses[4]!.body = { ...run, run_attempt: 3, status: 'in_progress', conclusion: null }
-    expect(createGate().execute(responses).status).not.toBe(0)
+    expect(createGate().execute(responses).status).toBe(1)
   })
 
   it.each([2, 3, 4])('rejects an identity mismatch in API response %s', (index) => {
     const responses = responsesFor()
     responses[index]!.body = { ...run, head_sha: 'b'.repeat(40) }
-    expect(createGate().execute(responses).status).not.toBe(0)
+    expect(createGate().execute(responses).status).toBe(1)
   })
 
   it.each([0, 1, 2, 3, 4])('fails closed on GitHub API error at response %s', (index) => {
     const responses = responsesFor()
     responses[index]!.error = true
-    expect(createGate().execute(responses).status).not.toBe(0)
+    expect(createGate().execute(responses).status).toBe(1)
   })
 
   it.each([0, 1, 2, 3, 4])('fails closed on malformed API response %s', (index) => {
     const responses = responsesFor()
     responses[index]!.raw = 'not JSON'
-    expect(createGate().execute(responses).status).not.toBe(0)
+    expect(createGate().execute(responses).status).toBe(1)
   })
 
   it.each(['failure', 'cancelled', 'success'])(
@@ -209,7 +220,7 @@ describe('dashboard main CI evidence gate', () => {
     (conclusion) => {
       const gate = createGate()
       expect(gate.execute(responsesFor()).status).toBe(0)
-      expect(gate.execute(responsesFor({ ...run, run_attempt: 3, conclusion }), 'final').status).not.toBe(0)
+      expect(gate.execute(responsesFor({ ...run, run_attempt: 3, conclusion }), 'final').status).toBe(1)
     },
   )
 
@@ -218,17 +229,19 @@ describe('dashboard main CI evidence gate', () => {
     expect(gate.execute(responsesFor()).status).toBe(0)
     const responses = responsesFor()
     responses[1]!.body = { total_count: 0, workflow_runs: [] }
-    expect(gate.execute(responses, 'final').status).not.toBe(0)
+    expect(gate.execute(responses, 'final').status).toBe(1)
   })
 
   it('rejects the final check without initial CI evidence', () => {
-    expect(createGate().execute(responsesFor(), 'final').status).not.toBe(0)
+    expect(createGate().execute(responsesFor(), 'final').status).toBe(1)
   })
 
   it.each([{ TARGET_SHA: 'invalid' }, { GITHUB_REPOSITORY: 'other/dashboard' }, { GH_TOKEN: '' }])(
     'rejects invalid gate context without making API requests: %j',
     (overrides) => {
-      expect(createGate().execute([], 'initial', overrides).status).not.toBe(0)
+      const result = createGate().execute([], 'initial', overrides)
+      expect(result.status).toBe(1)
+      expect(result.requests).toEqual([])
     },
   )
 })
