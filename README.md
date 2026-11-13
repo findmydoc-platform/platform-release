@@ -23,8 +23,7 @@ It requires one unambiguous `push` run of the active `.github/workflows/ci.yml` 
 validates the repository and current run attempt, and rejects missing, pending, failed, cancelled, or inconsistent evidence immediately.
 It never dispatches CI, reruns tests, or waits for CI completion. Existing CI path routing and test selection remain authoritative.
 
-The pinned reusable workflow checks evidence before installing dependencies and again immediately before the production upload.
-The second check must match the original run and attempt, including when a newer attempt succeeds during the build.
+The pinned reusable workflow checks the current CI evidence once, immediately before the production upload.
 Callers must grant the deployment job `actions: read` and `contents: read`.
 Application and Vercel production builds, deployment metadata, and existing release protection checks remain required.
 

@@ -22,8 +22,7 @@
     "prettier": "3.9.9",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.14",
-    "yaml": "2.9.0"
+    "vitest": "^4.0.14"
   },
   "packageManager": "pnpm@10.13.1"
 }
