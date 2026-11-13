@@ -16,6 +16,18 @@ New platform content templates include `githubSummaries` with `dashboard` and `w
 
 `content --json` returns both rendered notes in `githubReleaseNotes` for the same approval view. Both introductions are covered by the existing content digest. The German product summary and changes remain the FounderOps narrative; GitHub introductions are not copied into the manifest. Content without `githubSummaries` retains its original GitHub rendering and digest for historical retries and recovery. Release import content is unchanged.
 
+## Dashboard CI evidence
+
+The Dashboard deployment reuses the existing successful main CI run for the exact frozen `target_sha`.
+It requires one unambiguous `push` run of the active `.github/workflows/ci.yml` workflow on `main`,
+validates the repository and current run attempt, and rejects missing, pending, failed, cancelled, or inconsistent evidence immediately.
+It never dispatches CI, reruns tests, or waits for CI completion. Existing CI path routing and test selection remain authoritative.
+
+The pinned reusable workflow checks evidence before installing dependencies and again immediately before the production upload.
+The second check must match the original run and attempt, including when a newer attempt succeeds during the build.
+Callers must grant the deployment job `actions: read` and `contents: read`.
+Application and Vercel production builds, deployment metadata, and existing release protection checks remain required.
+
 ## Website package access
 
 The Website reusable deployment workflow requires the caller secret `GH_PACKAGES_READ_TOKEN` with private package read access.

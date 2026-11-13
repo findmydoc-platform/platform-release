@@ -41,6 +41,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     environment: Production
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Require dashboard main
         env:
@@ -81,6 +84,82 @@ jobs:
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
           git merge-base --is-ancestor "$TARGET_SHA" origin/main
 
+      - name: Prepare main CI gate
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/dashboard-main-ci-gate.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          umask 077
+
+          fail() {
+            echo "Main CI gate: $1" >&2
+            exit 1
+          }
+
+          phase="${1:-}"
+          [[ "$phase" = initial || "$phase" = final ]] || fail "Unsupported gate phase."
+          test "${GITHUB_REPOSITORY:-}" = "findmydoc-platform/clinic-dashboard" || fail "Unexpected caller repository."
+          [[ "${TARGET_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || fail "Invalid frozen SHA."
+          test -n "${GH_TOKEN:-}" || fail "GitHub read token is required."
+          test -n "${RUNNER_TEMP:-}" || fail "Runner temporary directory is required."
+
+          api() {
+            gh api --hostname github.com --method GET "$1" || fail "Cannot read GitHub CI evidence."
+          }
+
+          base="repos/$GITHUB_REPOSITORY/actions"
+          workflow="$(api "$base/workflows/ci.yml")"
+          jq -e 'type == "object" and .name == "CI" and .path == ".github/workflows/ci.yml" and .state == "active" and (.id | type == "number" and . > 0 and floor == .)' <<< "$workflow" >/dev/null 2>&1 || fail "Unexpected CI workflow identity."
+          workflow_id="$(jq -r '.id' <<< "$workflow")"
+          runs="$(api "$base/workflows/$workflow_id/runs?event=push&branch=main&head_sha=$TARGET_SHA&per_page=100")"
+          jq -e 'type == "object" and .total_count == 1 and (.workflow_runs | type == "array" and length == 1)' <<< "$runs" >/dev/null 2>&1 || fail "Expected exactly one main push CI run for the frozen SHA."
+          run="$(jq -c '.workflow_runs[0]' <<< "$runs")"
+          jq -e '(.id | type == "number" and . > 0 and floor == .) and (.run_attempt | type == "number" and . > 0 and floor == .)' <<< "$run" >/dev/null 2>&1 || fail "Invalid CI run or attempt identity."
+          run_id="$(jq -r '.id' <<< "$run")"
+          run_attempt="$(jq -r '.run_attempt' <<< "$run")"
+
+          require_success() {
+            jq -e --arg repository "$GITHUB_REPOSITORY" --arg sha "$TARGET_SHA" \
+              --argjson workflow "$workflow_id" --argjson run "$run_id" --argjson attempt "$run_attempt" '
+              type == "object" and
+              .repository.full_name == $repository and .head_repository.full_name == $repository and
+              .workflow_id == $workflow and .path == ".github/workflows/ci.yml" and
+              .event == "push" and .head_branch == "main" and .head_sha == $sha and
+              .id == $run and .run_attempt == $attempt and
+              .status == "completed" and .conclusion == "success"
+            ' >/dev/null 2>&1 || fail "Current main CI run attempt is not a verified success."
+          }
+
+          require_success <<< "$run"
+          current="$(api "$base/runs/$run_id")"
+          require_success <<< "$current"
+          attempt="$(api "$base/runs/$run_id/attempts/$run_attempt")"
+          require_success <<< "$attempt"
+          # Re-read the live run after the attempt endpoint; historical success cannot authorize a rerun.
+          current="$(api "$base/runs/$run_id")"
+          require_success <<< "$current"
+
+          evidence="$(jq -cn --argjson workflow "$workflow_id" --argjson run "$run_id" \
+            --argjson attempt "$run_attempt" --arg sha "$TARGET_SHA" \
+            '{workflow_id: $workflow, run_id: $run, run_attempt: $attempt, head_sha: $sha}')"
+          evidence_file="$RUNNER_TEMP/dashboard-main-ci-evidence.json"
+          if [[ "$phase" = initial ]]; then
+            printf '%s\n' "$evidence" > "$evidence_file"
+          else
+            test -f "$evidence_file" || fail "Initial CI evidence is missing."
+            test "$(cat "$evidence_file")" = "$evidence" || fail "CI run attempt changed during the production build."
+          fi
+          printf 'Verified main CI run %s attempt %s for %s.\n' "$run_id" "$run_attempt" "$TARGET_SHA"
+          EOF
+          chmod 700 "$RUNNER_TEMP/dashboard-main-ci-gate.sh"
+
+      - name: Require successful main CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: '"$RUNNER_TEMP/dashboard-main-ci-gate.sh" initial'
+
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -92,17 +171,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Validate application
-        run: |
-          pnpm format:check
-          pnpm check
-
-      - name: Install Chromium
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Test all layers
-        run: pnpm test:all
 
       - name: Build application
         env:
@@ -161,6 +229,12 @@ jobs:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: '"$RUNNER_TEMP/dashboard-vercel-deployment.sh" build production'
+
+      - name: Recheck successful main CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: '"$RUNNER_TEMP/dashboard-main-ci-gate.sh" final'
 
       - name: Deploy Vercel production
         env:

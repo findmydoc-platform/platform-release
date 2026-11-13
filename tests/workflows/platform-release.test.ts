@@ -233,4 +233,36 @@ describe('platform release workflows', () => {
     expectVercelToken(deploy)
     expect(deploy.run).toContain('deploy --prebuilt --prod --yes')
   })
+
+  it('requires read-only main CI evidence before installation and again immediately before dashboard deployment', async () => {
+    const workflow = await readWorkflow('reusable-deploy-dashboard.yml')
+    const steps = workflow.jobs.deploy.steps ?? []
+    const initial = namedStep(workflow, 'deploy', 'Require successful main CI')
+    const final = namedStep(workflow, 'deploy', 'Recheck successful main CI')
+    const install = namedStep(workflow, 'deploy', 'Install dependencies')
+    const build = namedStep(workflow, 'deploy', 'Build Vercel production')
+    const deploy = namedStep(workflow, 'deploy', 'Deploy Vercel production')
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    expect(workflow.jobs.deploy.permissions).toEqual({ actions: 'read', contents: 'read' })
+    for (const gate of [initial, final]) {
+      expect(gate.env).toEqual({ GH_TOKEN: '${{ github.token }}', TARGET_SHA: '${{ inputs.target_sha }}' })
+    }
+    expect(initial.run).toBe('"$RUNNER_TEMP/dashboard-main-ci-gate.sh" initial')
+    expect(final.run).toBe('"$RUNNER_TEMP/dashboard-main-ci-gate.sh" final')
+    expect(steps.indexOf(initial)).toBeLessThan(steps.indexOf(install))
+    expect(steps.indexOf(final)).toBeGreaterThan(steps.indexOf(build))
+    expect(steps.indexOf(final)).toBe(steps.indexOf(deploy) - 1)
+    expect(namedStep(workflow, 'deploy', 'Build application').run).toBe('pnpm build')
+    const commands = steps.map((step) => step.run ?? '').join('\n')
+    expect(commands).not.toMatch(/pnpm (?:format:check|check|test(?::|\s))/)
+    expect(commands).not.toContain('playwright install')
+    expect(workflow.jobs.deploy).toMatchObject({
+      if: "vars.VERCEL_PRODUCTION_DEPLOYMENTS_ENABLED == 'true'",
+      environment: 'Production',
+    })
+    expect(workflow.jobs['deployment-disabled'].if).toBe("vars.VERCEL_PRODUCTION_DEPLOYMENTS_ENABLED != 'true'")
+    expect(namedStep(workflow, 'deploy', 'Require dashboard main').run).toContain(
+      'test "$DEPLOY_REF" = "refs/heads/main"',
+    )
+  })
 })
