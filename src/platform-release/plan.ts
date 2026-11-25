@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { canonicalJson, sha256 } from './canonical.js'
+import { redactPrivateData } from './private-data.js'
 import { assertManualVersion, compareVersions, highestBump, nextVersion } from './semver.js'
 import { boundedVisualCandidates } from './visuals.js'
 import { validateSupabaseReleaseBinding, validateSupabaseReleaseConfig } from './supabase-reconciliation.js'
@@ -153,7 +154,7 @@ export async function createPlatformReleasePlan(
 
   const version = input.manualVersion ?? nextVersion(currentVersion, bump)
   if (input.manualVersion) assertManualVersion(input.manualVersion, currentVersion)
-  const planWithoutDigest: Omit<PlatformReleasePlan, 'digest'> = {
+  const planWithoutDigest = redactPrivateData<Omit<PlatformReleasePlan, 'digest'>>({
     breakingChanges,
     createdAt: new Date().toISOString(),
     highestBump: bump,
@@ -166,6 +167,6 @@ export async function createPlatformReleasePlan(
         repository.pullRequests.flatMap((pullRequest) => pullRequest.visuals),
       ),
     ),
-  }
+  })
   return { ...planWithoutDigest, digest: computePlanDigest(planWithoutDigest) }
 }

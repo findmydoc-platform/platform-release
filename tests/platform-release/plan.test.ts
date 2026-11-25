@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createPlatformReleasePlan, validatePlatformReleasePlan } from '../../src/platform-release/plan.js'
+import { computePlanDigest, createPlatformReleasePlan, validatePlatformReleasePlan } from '../../src/platform-release/plan.js'
 import { opsConfig } from './supabase-fixture.js'
 import type {
   PlatformReleaseConfig,
   PlatformReleaseGitHubClient,
   ReleaseCommit,
+  ReleasePullRequest,
 } from '../../src/platform-release/types.js'
 
 const config: PlatformReleaseConfig = {
@@ -56,7 +57,7 @@ class PlanningGitHub implements PlatformReleaseGitHubClient {
       ? [commit('website-commit', 'feat(reviews): add public reviews')]
       : [commit('dashboard-commit', 'fix(reviews): correct moderation state')]
   }
-  async getPullRequests() {
+  async getPullRequests(): Promise<ReleasePullRequest[]> {
     return []
   }
   async createDraftRelease() {
@@ -126,5 +127,38 @@ describe('platform release planning', () => {
     const plan = await createPlatformReleasePlan({ config }, new PlanningGitHub())
     plan.repositories.website.targetSha = 'tampered'
     expect(() => validatePlatformReleasePlan(plan)).toThrow('digest mismatch')
+  })
+
+  it('freezes a native plan with redacted GitHub metadata', async () => {
+    const github = new PlanningGitHub()
+    vi.spyOn(github, 'compareCommits').mockResolvedValue([
+      commit('release-commit', 'feat: add reviews\n\nSigned-off-by: Example <person@example.com>'),
+    ])
+    vi.spyOn(github, 'getPullRequests').mockResolvedValue([{
+      body: 'Contact person@example.com. See /home/example/private and http://127.0.0.1:3000/check.',
+      commitShas: ['release-commit'],
+      issues: [],
+      number: 42,
+      repository: config.repositories.website.repository,
+      title: 'feat: add reviews',
+      url: 'https://github.com/findmydoc-platform/website/pull/42',
+      visuals: [],
+    }])
+
+    const plan = await createPlatformReleasePlan({ config }, github)
+    expect(plan.repositories.website.commits[0]?.message).toContain('Signed-off-by: Example <[redacted-email]>')
+    expect(plan.repositories.website.pullRequests[0]).toMatchObject({
+      body: 'Contact [redacted-email]. See [redacted-local-path] and [redacted-local-url]',
+      url: 'https://github.com/findmydoc-platform/website/pull/42',
+    })
+    expect(() => validatePlatformReleasePlan(plan)).not.toThrow()
+  })
+
+  it('accepts an earlier frozen plan with its original digest', async () => {
+    const plan = await createPlatformReleasePlan({ config }, new PlanningGitHub())
+    plan.repositories.website.commits[0]!.message += '\n\nSigned-off-by: Example <person@example.com>'
+    plan.digest = computePlanDigest(plan)
+
+    expect(() => validatePlatformReleasePlan(plan)).not.toThrow()
   })
 })
